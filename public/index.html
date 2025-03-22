@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EPUB转PDF工具</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>EPUB 转 PDF 工具</h1>
+      <p>将EPUB电子书转换为PDF格式，保持格式和内容不变，避免乱码</p>
+    </header>
+    
+    <main>
+      <!-- 上传区域 -->
+      <div class="upload-area" id="uploadArea">
+        <div class="upload-message">
+          <i class="fas fa-cloud-upload-alt"></i>
+          <h2>拖放EPUB文件到这里</h2>
+          <p>或点击选择文件</p>
+        </div>
+        <input type="file" id="fileInput" accept=".epub" style="display: none;">
+        
+        <!-- 添加翻译选项 -->
+        <div class="translation-option">
+          <label class="switch">
+            <input type="checkbox" id="translateOption">
+            <span class="slider round"></span>
+          </label>
+          <span class="option-text">翻译成中文（使用AI自动翻译）</span>
+        </div>
+      </div>
+      
+      <!-- 状态区域 -->
+      <div class="conversion-status" id="conversionStatus" style="display: none;">
+        <div class="file-info">
+          <i class="fas fa-file-alt"></i>
+          <div>
+            <div class="file-name" id="fileName">文件名.epub</div>
+          </div>
+        </div>
+        
+        <div class="status-container">
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+          <div class="status-message" id="statusMessage">准备中...</div>
+        </div>
+        
+        <div class="buttons">
+          <button class="btn btn-secondary" id="cancelButton">
+            <i class="fas fa-times"></i> 取消
+          </button>
+          <button class="btn btn-primary" id="downloadButton" style="display: none;">
+            <i class="fas fa-download"></i> 下载PDF
+          </button>
+        </div>
+      </div>
+    </main>
+    
+    <!-- 特性介绍 -->
+    <div class="features">
+      <div class="feature">
+        <i class="fas fa-check-circle"></i>
+        <h3>完整转换</h3>
+        <p>保持原书的格式、图片和目录结构</p>
+      </div>
+      
+      <div class="feature">
+        <i class="fas fa-language"></i>
+        <h3>支持中文</h3>
+        <p>特别优化中文显示，避免乱码问题</p>
+      </div>
+      
+      <div class="feature">
+        <i class="fas fa-shield-alt"></i>
+        <h3>安全隐私</h3>
+        <p>文件仅用于转换，24小时后自动删除</p>
+      </div>
+    </div>
+    
+    <footer>
+      <p>Copyright &copy; 2023 EPUB转PDF工具 | 使用EPUB.js和Puppeteer构建</p>
+    </footer>
+  </div>
+  
+  <script src="/js/script.js"></script>
+</body>
+</html> 
