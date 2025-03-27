@@ -85,12 +85,31 @@ function smartSplitText(text, maxLength = 2000) {
   return segments;
 }
 
+// 检查API密钥配置
+function validateApiKey(apiKey, name) {
+  if (!apiKey) {
+    throw new Error(`${name}未配置，请在.env文件中设置${name}`);
+  }
+  // 用于日志记录的安全版本
+  return apiKey.substring(0, 4) + '****' + apiKey.substring(-4);
+}
+
+// 获取安全的API密钥（用于日志）
+function getSecureApiKey(apiKey) {
+  if (!apiKey) return '';
+  return apiKey.substring(0, 4) + '****' + apiKey.substring(-4);
+}
+
 /**
  * 使用硅基流动API翻译文本到中文（支持长文本自动分段）
  * @param {string} text - 待翻译文本
  * @returns {Promise<string>} - 翻译后的文本
  */
 async function translateWithSiliconFlow(text) {
+  const secureApiKey = validateApiKey(SILICONFLOW_API_KEY, 'SILICONFLOW_API_KEY');
+  console.log('使用SiliconFlow API进行翻译');
+  console.log(`API密钥: ${secureApiKey}`);
+  
   if (!text || text.trim() === '') {
     return text;
   }
@@ -253,6 +272,10 @@ async function translateWithSiliconFlow(text) {
  * @returns {Promise<string>} - 翻译后的文本
  */
 async function translateWithDeepSeek(text) {
+  const secureApiKey = validateApiKey(DEEPSEEK_API_KEY, 'DEEPSEEK_API_KEY');
+  console.log('使用DeepSeek API进行翻译');
+  console.log(`API密钥: ${secureApiKey}`);
+  
   if (!text || text.trim() === '') {
     return text;
   }
@@ -282,7 +305,7 @@ async function translateWithDeepSeek(text) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY.trim()}`
         },
         body: JSON.stringify({
           model: "deepseek-chat",
