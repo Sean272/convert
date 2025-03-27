@@ -47,37 +47,62 @@ main {
 
 /* 上传区域 */
 .upload-area {
-  border: 2px dashed #4b6cb7;
-  border-radius: 6px;
-  padding: 40px;
+  border: 2px dashed #ccc;
+  padding: 20px;
   text-align: center;
-  cursor: pointer;
+  background: #f9f9f9;
+  border-radius: 8px;
+  margin-bottom: 20px;
   transition: all 0.3s ease;
 }
 
-.upload-area:hover, .upload-area.dragover {
-  background-color: #f0f5ff;
-  border-color: #4b6cb7;
+.upload-area:hover {
+  border-color: #2196F3;
+  background: #f0f8ff;
 }
 
-.upload-message {
-  margin-bottom: 20px;
+.drop-zone {
+  padding: 20px;
 }
 
-.upload-message i {
-  font-size: 3rem;
-  color: #4b6cb7;
-  margin-bottom: 15px;
+.select-file-btn {
+  background-color: #2196F3;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  margin: 10px 0;
+  transition: background-color 0.3s ease;
 }
 
-.upload-message h2 {
-  font-size: 1.5rem;
-  color: #4b6cb7;
-  margin-bottom: 5px;
+.select-file-btn:hover {
+  background-color: #1976D2;
 }
 
-.upload-message p {
-  color: #666;
+.start-convert-btn {
+  background-color: #4CAF50;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  margin: 10px 0;
+  transition: background-color 0.3s ease;
+}
+
+.start-convert-btn:hover {
+  background-color: #388E3C;
+}
+
+#selectedFileInfo {
+  margin-top: 15px;
+  padding: 10px;
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 /* 翻译选项样式 */
@@ -177,24 +202,58 @@ input:checked + .slider:before {
   margin-bottom: 20px;
 }
 
-.progress-bar-container {
-  height: 12px;
-  background-color: #eee;
-  border-radius: 6px;
-  overflow: hidden;
-  margin-bottom: 10px;
+.progress-container {
+  margin: 20px 0;
+  padding: 20px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.progress-status {
+  display: flex;
+  align-items: center;
+  gap: 15px;
 }
 
 .progress-bar {
+  flex: 1;
+  height: 20px;
+  background: #eee;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #4b6cb7, #182848);
+  background: #4a90e2;
   width: 0%;
   transition: width 0.3s ease;
 }
 
+.progress-text {
+  min-width: 50px;
+  text-align: right;
+  font-weight: bold;
+  color: #4a90e2;
+}
+
 .status-message {
+  margin-top: 10px;
   color: #666;
-  font-size: 0.9rem;
+  font-size: 14px;
+}
+
+#progressText, #statusText {
+  margin: 10px 0;
+  font-size: 14px;
+  color: #555;
+}
+
+#statusText {
+  font-weight: bold;
+  font-size: 16px;
+  color: #333;
 }
 
 /* 按钮 */
@@ -293,4 +352,334 @@ footer {
   .features {
     grid-template-columns: 1fr;
   }
+}
+
+/* 按钮样式 */
+.button {
+  display: inline-block;
+  padding: 10px 20px;
+  background-color: #4b6cb7;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.button:hover {
+  background-color: #3a5a9e;
+  transform: translateY(-2px);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+
+.button.primary {
+  background-color: #4b6cb7;
+  color: white;
+}
+
+.button.secondary {
+  background-color: #6c757d;
+  color: white;
+}
+
+/* 文件输入样式 */
+input[type="file"] {
+  display: block;
+  margin: 15px auto;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background-color: #f8f8f8;
+  cursor: pointer;
+  width: 80%;
+  max-width: 300px;
+}
+
+/* 章节列表样式 */
+.chapters-container {
+  margin: 20px 0;
+  padding: 20px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.chapters-container ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.chapters-container li {
+  padding: 10px;
+  border-bottom: 1px solid #eee;
+}
+
+.chapters-container li:last-child {
+  border-bottom: none;
+}
+
+/* 下载按钮样式 */
+.download-container {
+  text-align: center;
+  margin: 20px 0;
+}
+
+.download-button {
+  display: inline-block;
+  background: #4a90e2;
+  color: white;
+  padding: 12px 24px;
+  border-radius: 4px;
+  text-decoration: none;
+  transition: background 0.3s ease;
+}
+
+.download-button:hover {
+  background: #357abd;
+}
+
+/* PDF翻译区域样式 */
+.pdf-container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.chapters-area {
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  padding: 15px;
+  margin-top: 20px;
+  box-shadow: 0 1px 5px rgba(0,0,0,0.1);
+}
+
+.chapters-area h4 {
+  color: #4b6cb7;
+  margin-bottom: 10px;
+  font-size: 1.2rem;
+}
+
+.small-text {
+  font-size: 0.85rem;
+  color: #666;
+  margin-bottom: 15px;
+}
+
+.chapters-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 5px;
+  background-color: #fff;
+}
+
+.chapter-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 15px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.chapter-item:last-child {
+  border-bottom: none;
+}
+
+.chapter-item:hover {
+  background-color: #f5f7fa;
+}
+
+.chapter-title {
+  flex: 1;
+  font-size: 0.9rem;
+}
+
+.chapter-download {
+  background-color: #4b6cb7;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.chapter-download i {
+  margin-right: 5px;
+  font-size: 0.8rem;
+}
+
+.chapter-download:hover {
+  background-color: #3a589e;
+}
+
+.loading-chapters {
+  padding: 15px;
+  text-align: center;
+  color: #666;
+  font-style: italic;
+}
+
+/* 已恢复任务列表样式 */
+.restored-tasks-container {
+  margin: 20px 0;
+  padding: 20px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.section-header h3 {
+  margin: 0;
+  color: #4b6cb7;
+}
+
+.refresh-btn {
+  background-color: #f0f0f0;
+  border: none;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  color: #555;
+}
+
+.refresh-btn:hover {
+  background-color: #e0e0e0;
+}
+
+.tasks-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.task-item {
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.task-item:hover {
+  border-color: #4b6cb7;
+  background-color: #f8f9ff;
+}
+
+.task-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.task-title {
+  font-weight: bold;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70%;
+}
+
+.task-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.status-completed {
+  background-color: #e6f7e6;
+  color: #2e7d32;
+}
+
+.status-translating {
+  background-color: #e3f2fd;
+  color: #1976d2;
+}
+
+.status-error {
+  background-color: #ffebee;
+  color: #c62828;
+}
+
+.task-progress {
+  height: 5px;
+  background-color: #eee;
+  border-radius: 3px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+
+.task-progress-fill {
+  height: 100%;
+  background-color: #4b6cb7;
+  transition: width 0.3s ease;
+}
+
+.task-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.task-action-btn {
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.view-btn {
+  background-color: #e3f2fd;
+  color: #1976d2;
+}
+
+.view-btn:hover {
+  background-color: #bbdefb;
+}
+
+.download-btn {
+  background-color: #e8f5e9;
+  color: #2e7d32;
+}
+
+.download-btn:hover {
+  background-color: #c8e6c9;
+}
+
+.loading-text {
+  color: #757575;
+  text-align: center;
+  font-style: italic;
+}
+
+.empty-text {
+  color: #757575;
+  text-align: center;
+  padding: 20px;
+}
+
+.pdf-container .error {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.pdf-container .warning {
+    color: #ffc107;
+    font-weight: bold;
 } 

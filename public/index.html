@@ -3,90 +3,179 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>EPUB转PDF工具</title>
-  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" id="style-css" href="/css/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+  <script id="cache-fix-script" src="/js/cache-fix.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const timestamp = new Date().getTime();
+      document.getElementById('style-css').href = '/css/style.css?v=' + timestamp;
+      document.getElementById('cache-fix-script').src = '/js/cache-fix.js?v=' + timestamp;
+      document.getElementById('main-script').src = '/js/script.js?v=' + timestamp;
+    });
+  </script>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>EPUB 转 PDF 工具</h1>
-      <p>将EPUB电子书转换为PDF格式，保持格式和内容不变，避免乱码</p>
+      <h1>EPUB转换工具</h1>
+      <p>将EPUB文件转换为PDF并生成翻译</p>
     </header>
-    
-    <main>
-      <!-- 上传区域 -->
-      <div class="upload-area" id="uploadArea">
-        <div class="upload-message">
-          <i class="fas fa-cloud-upload-alt"></i>
-          <h2>拖放EPUB文件到这里</h2>
-          <p>或点击选择文件</p>
-        </div>
-        <input type="file" id="fileInput" accept=".epub" style="display: none;">
-        
-        <!-- 添加翻译选项 -->
-        <div class="translation-option">
-          <label class="switch">
-            <input type="checkbox" id="translateOption">
-            <span class="slider round"></span>
-          </label>
-          <span class="option-text">翻译成中文（使用AI自动翻译）</span>
-        </div>
-      </div>
-      
-      <!-- 状态区域 -->
-      <div class="conversion-status" id="conversionStatus" style="display: none;">
-        <div class="file-info">
-          <i class="fas fa-file-alt"></i>
-          <div>
-            <div class="file-name" id="fileName">文件名.epub</div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="epub-convert">EPUB转PDF</button>
+      <button class="tab" data-tab="pdf-translate">PDF直接翻译</button>
+    </div>
+
+    <div class="tab-content" id="epub-convert">
+      <div class="upload-area" id="dropArea">
+        <form id="uploadForm">
+          <div class="drag-area">
+            <i class="fa fa-cloud-upload"></i>
+            <h3>拖放EPUB文件到这里</h3>
+            <p>或</p>
+            <input type="file" id="fileInput" name="file" accept=".epub" hidden>
+            <button type="button" id="browseBtn" class="button">选择文件</button>
           </div>
-        </div>
-        
-        <div class="status-container">
-          <div class="progress-bar-container">
+          <div class="file-info" id="fileInfo">
+            <span class="file-name"></span>
+            <span class="file-size"></span>
+          </div>
+          <button type="submit" id="uploadBtn" class="button primary" disabled>上传并转换</button>
+        </form>
+      </div>
+
+      <div class="progress-area" id="progressArea" style="display: none;">
+        <div class="progress-container">
+          <div class="progress-bar-wrapper">
             <div class="progress-bar" id="progressBar"></div>
+            <div class="progress-percentage" id="progressPercentage">0%</div>
           </div>
-          <div class="status-message" id="statusMessage">准备中...</div>
-        </div>
-        
-        <div class="buttons">
-          <button class="btn btn-secondary" id="cancelButton">
-            <i class="fas fa-times"></i> 取消
-          </button>
-          <button class="btn btn-primary" id="downloadButton" style="display: none;">
-            <i class="fas fa-download"></i> 下载PDF
-          </button>
+          <p id="statusMessage">正在处理...</p>
         </div>
       </div>
-    </main>
-    
-    <!-- 特性介绍 -->
-    <div class="features">
-      <div class="feature">
-        <i class="fas fa-check-circle"></i>
-        <h3>完整转换</h3>
-        <p>保持原书的格式、图片和目录结构</p>
-      </div>
-      
-      <div class="feature">
-        <i class="fas fa-language"></i>
-        <h3>支持中文</h3>
-        <p>特别优化中文显示，避免乱码问题</p>
-      </div>
-      
-      <div class="feature">
-        <i class="fas fa-shield-alt"></i>
-        <h3>安全隐私</h3>
-        <p>文件仅用于转换，24小时后自动删除</p>
+
+      <div class="download-area" id="downloadArea" style="display: none;">
+        <h3>转换完成!</h3>
+        <div class="download-buttons">
+          <a href="#" id="downloadPdfBtn" class="button primary" download>
+            <i class="fa fa-download"></i> 下载原文PDF
+          </a>
+          <a href="#" id="downloadTranslationBtn" class="button secondary" download>
+            <i class="fa fa-language"></i> 下载翻译文件
+          </a>
+        </div>
       </div>
     </div>
-    
+
+    <div class="tab-content" id="pdf-translate" style="display: none;">
+      <div class="pdf-container" id="pdfContainer">
+        <div class="upload-area" id="pdfDropZone">
+          <form id="pdfUploadForm" enctype="multipart/form-data">
+            <div class="drop-zone">
+              <p>拖拽PDF文件到这里或点击选择文件</p>
+              <input type="file" id="pdfFileInput" name="file" accept=".pdf" style="display: none;">
+              <button type="button" class="select-file-btn" onclick="document.getElementById('pdfFileInput').click()">选择文件</button>
+            </div>
+            <div id="selectedFileInfo" style="display: none;">
+              <p>已选择文件: <span id="selectedFileName"></span></p>
+              <button type="submit" class="start-convert-btn">开始转换</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- 已恢复任务列表 -->
+        <div id="restoredTasksContainer" class="container">
+          <h2>已恢复的翻译任务</h2>
+          <button id="refreshTasksBtn" class="refresh-btn">刷新</button>
+          <div id="restoredTasksList"></div>
+        </div>
+
+        <!-- 添加任务详情容器 -->
+        <div id="taskDetailsContainer" class="container" style="display: none;">
+          <h2>任务详情</h2>
+          <div id="taskDetails">
+            <div class="upload-section">
+              <h3>重新上传PDF文件继续翻译</h3>
+              <form id="resumeUploadForm">
+                <input type="file" id="resumePdfFile" accept=".pdf" required>
+                <button type="submit" class="upload-btn">上传并继续翻译</button>
+              </form>
+            </div>
+            <div id="taskProgress" style="display: none;">
+              <div class="progress-bar">
+                <div class="progress-fill"></div>
+              </div>
+              <div class="status-message"></div>
+            </div>
+          </div>
+          <button class="back-btn" onclick="showRestoredTasks()">返回任务列表</button>
+        </div>
+
+        <div class="progress-container" id="pdfProgressContainer" style="display: none;">
+          <div class="progress-status">
+            <div class="progress-bar">
+              <div class="progress-fill" id="pdfProgressBar"></div>
+            </div>
+            <div class="progress-text" id="pdfProgressText">0%</div>
+          </div>
+          <div class="status-message" id="pdfStatusMessage"></div>
+        </div>
+
+        <div class="chapters-container" id="pdfChaptersContainer" style="display: none;">
+          <h3>已完成章节</h3>
+          <ul id="pdfChaptersList"></ul>
+        </div>
+
+        <div class="download-container" id="pdfDownloadContainer" style="display: none;">
+          <h3>翻译完成</h3>
+          <a href="#" id="pdfDownloadLink" class="download-button">下载翻译文件</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="error-message" id="errorMessage" style="display: none;">
+      <p id="errorText"></p>
+    </div>
+
     <footer>
-      <p>Copyright &copy; 2023 EPUB转PDF工具 | 使用EPUB.js和Puppeteer构建</p>
+      <p>© 2023-2024 EPUB转PDF工具 | 版本 1.1.0</p>
     </footer>
   </div>
-  
-  <script src="/js/script.js"></script>
+
+  <script id="main-script" src="/js/script.js"></script>
+  <style>
+    .upload-section {
+      margin: 20px 0;
+      padding: 20px;
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .upload-btn {
+      margin-top: 10px;
+      padding: 8px 16px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .back-btn {
+      margin-top: 20px;
+      padding: 8px 16px;
+      background-color: #666;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+  </style>
 </body>
 </html> 

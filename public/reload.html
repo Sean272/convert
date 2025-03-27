@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>重新加载中...</title>
+  <style>
+    body {
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background-color: #f9f9f9;
+      flex-direction: column;
+    }
+    .loader {
+      border: 5px solid #f3f3f3;
+      border-top: 5px solid #4b6cb7;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    p {
+      color: #666;
+      font-size: 18px;
+    }
+  </style>
+</head>
+<body>
+  <div class="loader"></div>
+  <p>正在重新加载应用...</p>
+  <script>
+    // 添加时间戳参数以避免缓存
+    setTimeout(function() {
+      window.location.href = '/?t=' + new Date().getTime();
+    }, 1500);
+  </script>
+</body>
+</html> 

@@ -17,10 +17,11 @@ const fetch = require('node-fetch');
 require('dotenv').config();
 
 // 从环境变量中读取翻译相关配置
-const MAX_TRANSLATE_LENGTH = parseInt(process.env.MAX_TRANSLATE_LENGTH || 3000); // 降低每次翻译的最大字符数
-const TRANSLATE_DELAY = parseInt(process.env.TRANSLATE_DELAY || 3000); // 翻译请求间隔提高到3秒
+const MAX_TRANSLATE_LENGTH = parseInt(process.env.MAX_TRANSLATE_LENGTH || 9000); // 增加最大翻译长度限制
+const TRANSLATE_DELAY = parseInt(process.env.TRANSLATE_DELAY || 6000); // 翻译请求间隔提高到6秒
 const MAX_RETRY_ATTEMPTS = parseInt(process.env.MAX_RETRY_ATTEMPTS || 5); // 最大重试次数
 const RETRY_DELAY_BASE = parseInt(process.env.RETRY_DELAY_BASE || 5000); // 重试基本延迟5秒
+const BATCH_CHAR_LIMIT = parseInt(process.env.BATCH_CHAR_LIMIT || 3000); // 每批翻译的字符数
 
 // API配置
 const TRANSLATOR_API = process.env.TRANSLATOR_API || 'SIMULATE'; // 默认使用模拟翻译
@@ -30,7 +31,62 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/chat/completions';
 
 /**
- * 使用硅基流动API翻译文本到中文
+ * 智能切分文本，确保在句子边界处切分
+ * @param {string} text - 要切分的文本
+ * @param {number} maxLength - 每个片段的最大长度
+ * @returns {string[]} - 切分后的文本片段数组
+ */
+function smartSplitText(text, maxLength = 2000) {
+  if (!text || text.length <= maxLength) {
+    return [text];
+  }
+
+  // 句子边界的正则表达式
+  const sentenceBoundary = /[.!?。！？]\s+/g;
+  const segments = [];
+  let start = 0;
+
+  while (start < text.length) {
+    if (start + maxLength >= text.length) {
+      segments.push(text.substring(start));
+      break;
+    }
+
+    // 找出当前范围内的所有句子边界
+    let end = start + maxLength;
+    const searchText = text.substring(start, end);
+    const matches = [...searchText.matchAll(sentenceBoundary)];
+    
+    if (matches.length > 0) {
+      // 使用最后一个句子边界作为切分点
+      const lastMatch = matches[matches.length - 1];
+      const boundaryIndex = start + lastMatch.index + 1; // +1 包含句号
+      segments.push(text.substring(start, boundaryIndex));
+      start = boundaryIndex + 1; // +1 跳过空格
+    } else {
+      // 如果没有找到句子边界，则在单词边界处切分
+      const wordBoundary = /\s+/g;
+      const wordMatches = [...searchText.matchAll(wordBoundary)].reverse();
+      
+      if (wordMatches.length > 0) {
+        // 使用最后一个单词边界
+        const lastWordMatch = wordMatches[0];
+        const wordIndex = start + lastWordMatch.index;
+        segments.push(text.substring(start, wordIndex));
+        start = wordIndex + 1;
+      } else {
+        // 如果连单词边界都没有，则强制切分
+        segments.push(text.substring(start, end));
+        start = end;
+      }
+    }
+  }
+
+  return segments;
+}
+
+/**
+ * 使用硅基流动API翻译文本到中文（支持长文本自动分段）
  * @param {string} text - 待翻译文本
  * @returns {Promise<string>} - 翻译后的文本
  */
@@ -43,17 +99,29 @@ async function translateWithSiliconFlow(text) {
     throw new Error('硅基流动API密钥未配置，请在.env文件中设置SILICONFLOW_API_KEY');
   }
 
-  try {
-    console.log(`使用硅基流动API翻译: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
+  // 对长文本进行智能分段
+  const maxSegmentLength = 3000; // 每段最大长度
+  const segments = smartSplitText(text, maxSegmentLength);
+  
+  if (segments.length > 1) {
+    console.log(`文本过长，已分成${segments.length}段进行翻译`);
+  }
+
+  let translatedText = '';
+  
+  // 逐段翻译
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
     
-    const response = await fetch(SILICONFLOW_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SILICONFLOW_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: "deepseek-ai/DeepSeek-V3", // 使用V3模型进行翻译，性价比更高
+    try {
+      console.log(`翻译第${i+1}/${segments.length}段: ${segment.substring(0, 50)}${segment.length > 50 ? '...' : ''}`);
+      
+      // 打印完整请求信息以便调试
+      console.log(`API请求URL: ${SILICONFLOW_API_URL}`);
+      console.log(`API密钥前几位: ${SILICONFLOW_API_KEY.substring(0, 10)}...`);
+      
+      const payload = {
+        model: "Pro/deepseek-ai/DeepSeek-R1",  // 使用完整的模型ID
         messages: [
           { 
             role: "system", 
@@ -61,43 +129,126 @@ async function translateWithSiliconFlow(text) {
           },
           { 
             role: "user", 
-            content: text 
+            content: segment 
           }
         ],
         temperature: 0.3,
         max_tokens: 4000
-      })
-    });
-
-    if (!response.ok) {
-      // 详细记录错误信息
-      const responseText = await response.text();
-      console.error(`硅基流动API错误状态码: ${response.status}, 响应内容: ${responseText}`);
+      };
       
-      try {
-        const errorData = JSON.parse(responseText);
-        throw new Error(`硅基流动API调用失败: ${errorData.error?.message || response.statusText || '未知错误'}`);
-      } catch (jsonError) {
-        throw new Error(`硅基流动API调用失败: ${response.statusText}, 响应: ${responseText}`);
+      console.log(`请求载荷: ${JSON.stringify(payload)}`);
+      
+      const response = await fetch(SILICONFLOW_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SILICONFLOW_API_KEY.trim()}`  // 确保移除任何空格
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        // 详细记录错误信息
+        const responseText = await response.text();
+        console.error(`硅基流动API错误状态码: ${response.status}, 响应内容: ${responseText}`);
+        console.error(`完整请求信息: ${JSON.stringify({
+          url: SILICONFLOW_API_URL,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SILICONFLOW_API_KEY.substring(0, 10)}...`
+          },
+          body: JSON.stringify(payload)
+        })}`);
+        
+        try {
+          const errorData = JSON.parse(responseText);
+          throw new Error(`硅基流动API调用失败: ${errorData.error?.message || errorData.message || response.statusText || '未知错误'}`);
+        } catch (jsonError) {
+          throw new Error(`硅基流动API调用失败: ${response.statusText}, 响应: ${responseText}`);
+        }
+      }
+
+      const data = await response.json();
+      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+        throw new Error(`硅基流动API返回数据格式不正确: ${JSON.stringify(data)}`);
+      }
+      
+      const segmentTranslation = data.choices[0].message.content.trim();
+      translatedText += (i > 0 ? ' ' : '') + segmentTranslation;
+      console.log(`硅基流动翻译成功，翻译了${segment.length}个字符`);
+      
+      // 添加延迟避免API限流
+      if (i < segments.length - 1) {
+        const delay = parseInt(process.env.TRANSLATE_DELAY || 1000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    } catch (error) {
+      console.error(`硅基流动翻译第${i+1}段失败: ${error.message}`);
+      // 如果DeepSeek-V3失败，尝试使用DeepSeek-R1
+      if (error.message.includes('Model does not exist') || error.message.includes('调用失败')) {
+        console.log('尝试使用DeepSeek-R1模型...');
+        try {
+          const payload = {
+            model: "deepseek-ai/DeepSeek-R1",  // 尝试备用模型
+            messages: [
+              { 
+                role: "system", 
+                content: "你是一个专业的翻译助手，请将提供的英文内容翻译成流畅自然的中文。只返回翻译结果，不要添加任何解释或额外内容。" 
+              },
+              { 
+                role: "user", 
+                content: segment 
+              }
+            ],
+            temperature: 0.3,
+            max_tokens: 4000
+          };
+          
+          const response = await fetch(SILICONFLOW_API_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${SILICONFLOW_API_KEY.trim()}`
+            },
+            body: JSON.stringify(payload)
+          });
+          
+          if (!response.ok) {
+            const responseText = await response.text();
+            console.error(`备用模型调用失败: ${response.status}, ${responseText}`);
+            throw new Error(`备用模型调用失败: ${responseText}`);
+          }
+          
+          const data = await response.json();
+          if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+            throw new Error(`备用模型返回数据格式不正确: ${JSON.stringify(data)}`);
+          }
+          
+          const segmentTranslation = data.choices[0].message.content.trim();
+          translatedText += (i > 0 ? ' ' : '') + segmentTranslation;
+          console.log(`备用模型翻译成功，翻译了${segment.length}个字符`);
+          
+          // 添加延迟避免API限流
+          if (i < segments.length - 1) {
+            const delay = parseInt(process.env.TRANSLATE_DELAY || 1000);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        } catch (backupError) {
+          console.error(`备用模型也失败: ${backupError.message}`);
+          throw error; // 继续抛出原始错误
+        }
+      } else {
+        throw error;
       }
     }
-
-    const data = await response.json();
-    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-      throw new Error(`硅基流动API返回数据格式不正确: ${JSON.stringify(data)}`);
-    }
-    
-    const translatedText = data.choices[0].message.content.trim();
-    console.log(`硅基流动翻译成功，翻译了${text.length}个字符`);
-    return translatedText;
-  } catch (error) {
-    console.error(`硅基流动翻译失败: ${error.message}`);
-    throw error;
   }
+  
+  return translatedText;
 }
 
 /**
- * 使用DeepSeek官方API翻译文本到中文
+ * 使用DeepSeek官方API翻译文本到中文（支持长文本自动分段）
  * @param {string} text - 待翻译文本
  * @returns {Promise<string>} - 翻译后的文本
  */
@@ -110,60 +261,83 @@ async function translateWithDeepSeek(text) {
     throw new Error('DeepSeek API密钥未配置，请在.env文件中设置DEEPSEEK_API_KEY');
   }
 
-  try {
-    console.log(`使用DeepSeek官方API翻译: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
-    
-    const response = await fetch(DEEPSEEK_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { 
-            role: "system", 
-            content: "你是一个专业的翻译助手，请将提供的英文内容翻译成流畅自然的中文。只返回翻译结果，不要添加任何解释或额外内容。" 
-          },
-          { 
-            role: "user", 
-            content: text 
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 4000
-      })
-    });
-
-    if (!response.ok) {
-      const responseText = await response.text();
-      console.error(`DeepSeek API错误状态码: ${response.status}, 响应内容: ${responseText}`);
-      
-      try {
-        const errorData = JSON.parse(responseText);
-        throw new Error(`DeepSeek API调用失败: ${errorData.error?.message || response.statusText || '未知错误'}`);
-      } catch (jsonError) {
-        throw new Error(`DeepSeek API调用失败: ${response.statusText}, 响应: ${responseText}`);
-      }
-    }
-
-    const data = await response.json();
-    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-      throw new Error(`DeepSeek API返回数据格式不正确: ${JSON.stringify(data)}`);
-    }
-    
-    const translatedText = data.choices[0].message.content.trim();
-    console.log(`DeepSeek翻译成功，翻译了${text.length}个字符`);
-    return translatedText;
-  } catch (error) {
-    console.error(`DeepSeek翻译失败: ${error.message}`);
-    throw error;
+  // 对长文本进行智能分段
+  const maxSegmentLength = 3000; // 每段最大长度
+  const segments = smartSplitText(text, maxSegmentLength);
+  
+  if (segments.length > 1) {
+    console.log(`文本过长，已分成${segments.length}段进行翻译`);
   }
+
+  let translatedText = '';
+  
+  // 逐段翻译
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    
+    try {
+      console.log(`翻译第${i+1}/${segments.length}段: ${segment.substring(0, 50)}${segment.length > 50 ? '...' : ''}`);
+      
+      const response = await fetch(DEEPSEEK_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            { 
+              role: "system", 
+              content: "你是一个专业的翻译助手，请将提供的英文内容翻译成流畅自然的中文。只返回翻译结果，不要添加任何解释或额外内容。" 
+            },
+            { 
+              role: "user", 
+              content: segment 
+            }
+          ],
+          temperature: 0.3,
+          max_tokens: 4000
+        })
+      });
+
+      if (!response.ok) {
+        const responseText = await response.text();
+        console.error(`DeepSeek API错误状态码: ${response.status}, 响应内容: ${responseText}`);
+        
+        try {
+          const errorData = JSON.parse(responseText);
+          throw new Error(`DeepSeek API调用失败: ${errorData.error?.message || response.statusText || '未知错误'}`);
+        } catch (jsonError) {
+          throw new Error(`DeepSeek API调用失败: ${response.statusText}, 响应: ${responseText}`);
+        }
+      }
+
+      const data = await response.json();
+      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+        throw new Error(`DeepSeek API返回数据格式不正确: ${JSON.stringify(data)}`);
+      }
+      
+      const segmentTranslation = data.choices[0].message.content.trim();
+      translatedText += (i > 0 ? ' ' : '') + segmentTranslation;
+      console.log(`DeepSeek翻译成功，翻译了${segment.length}个字符`);
+      
+      // 添加延迟避免API限流
+      if (i < segments.length - 1) {
+        const delay = parseInt(process.env.TRANSLATE_DELAY || 1000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    } catch (error) {
+      console.error(`DeepSeek翻译第${i+1}段失败: ${error.message}`);
+      throw error;
+    }
+  }
+  
+  return translatedText;
 }
 
 /**
- * 使用Google翻译API翻译文本到中文
+ * 使用Google翻译API翻译文本到中文（支持长文本自动分段）
  * @param {string} text - 待翻译文本
  * @returns {Promise<string>} - 翻译后的文本
  */
@@ -172,130 +346,126 @@ async function translateWithGoogle(text) {
     return text;
   }
 
+  // 对长文本进行智能分段
+  const maxSegmentLength = 5000; // Google翻译API支持更长的文本
+  const segments = smartSplitText(text, maxSegmentLength);
+  
+  if (segments.length > 1) {
+    console.log(`文本过长，已分成${segments.length}段进行Google翻译`);
+  }
+
+  let translatedText = '';
+  
+  // 逐段翻译
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    
+    try {
+      console.log(`使用Google翻译第${i+1}/${segments.length}段: ${segment.substring(0, 50)}${segment.length > 50 ? '...' : ''}`);
+      
+      const { text: segmentTranslation } = await translate(segment, { to: 'zh-CN' });
+      translatedText += (i > 0 ? ' ' : '') + segmentTranslation;
+      console.log(`Google翻译成功，翻译了 ${segment.length} 个字符`);
+      
+      // 添加延迟避免API限流
+      if (i < segments.length - 1) {
+        const delay = parseInt(process.env.TRANSLATE_DELAY || 1000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    } catch (error) {
+      console.error(`Google翻译第${i+1}段失败: ${error.message}`);
+      throw error;
+    }
+  }
+  
+  return translatedText;
+}
+
+/**
+ * 翻译文本
+ * @param {string} text - 要翻译的文本
+ * @param {number} retryCount - 重试次数
+ * @returns {Promise<string>} - 翻译后的文本
+ */
+async function translateText(text, retryCount = 0) {
+  // 缓存已经翻译过的内容，避免重复请求API
+  if (!translateText.cache) {
+    translateText.cache = new Map();
+  }
+  
+  // 检查缓存中是否已经有此文本的翻译
+  if (translateText.cache.has(text)) {
+    console.log(`使用缓存的翻译结果，节省API请求`);
+    return translateText.cache.get(text);
+  }
+  
   try {
-    console.log(`使用Google翻译API: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
-    const { text: translatedText } = await translate(text, { to: 'zh-CN' });
-    console.log(`Google翻译成功，翻译了 ${text.length} 个字符`);
+    // 检查是否是空文本或只包含特殊字符的文本
+    if (!text || text.trim().length === 0 || !/[a-zA-Z]{3,}/.test(text)) {
+      return text;
+    }
+    
+    console.log(`使用${TRANSLATOR_API.toLowerCase()}API翻译...`);
+    console.log(`使用${TRANSLATOR_API.toLowerCase()}API翻译: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
+    
+    let translatedText = '';
+    
+    // 尝试各种翻译方法
+    if (TRANSLATOR_API.toUpperCase() === 'SIMULATE') {
+      translatedText = simulateTranslation(text);
+    } else if (TRANSLATOR_API.toUpperCase() === 'GOOGLE') {
+      translatedText = await translateWithGoogle(text);
+    } else if (TRANSLATOR_API.toUpperCase() === 'SILICONFLOW') {
+      translatedText = await translateWithSiliconFlow(text);
+    } else if (TRANSLATOR_API.toUpperCase() === 'DEEPSEEK') {
+      translatedText = await translateWithDeepSeek(text);
+    } else {
+      // 默认使用模拟翻译
+      translatedText = simulateTranslation(text);
+    }
+    
+    // 如果翻译成功，保存到缓存中
+    if (translatedText && translatedText.trim().length > 0) {
+      translateText.cache.set(text, translatedText);
+    }
+    
     return translatedText;
   } catch (error) {
-    console.error(`Google翻译失败: ${error.message}`);
-    throw error;
+    console.error(`翻译API调用失败: ${error.message}`);
+    
+    // 如果重试次数在限制内，尝试重试
+    if (retryCount < 2) {
+      console.log(`尝试重试翻译，重试次数: ${retryCount + 1}/2`);
+      await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒再重试
+      return translateText(text, retryCount + 1);
+    }
+    
+    // 重试次数用尽，使用备选翻译
+    console.log('使用模拟翻译作为备选方案');
+    const backupTranslation = simulateTranslation(text);
+    
+    // 将备选翻译也加入缓存
+    translateText.cache.set(text, backupTranslation);
+    
+    return backupTranslation;
   }
 }
 
 /**
- * 将文本翻译为中文，根据配置选择翻译API
+ * 模拟翻译文本，用于测试
  * @param {string} text - 待翻译文本
- * @param {number} retryCount - 当前重试次数
- * @returns {Promise<string>} - 翻译后的文本
+ * @returns {string} - 模拟翻译后的文本
  */
-async function translateText(text, retryCount = 0) {
+function simulateTranslation(text) {
   if (!text || text.trim() === '') {
     return text;
   }
 
-  // 加入模拟翻译的功能，当重试次数过多时自动启用
-  if (retryCount >= 2) {
-    console.log(`已达到重试阈值，使用简单替换的模拟翻译`);
-    return simulateTranslation(text);
-  }
+  console.log('使用模拟翻译...');
   
-  try {
-    // 翻译API可能有长度限制，分段翻译
-    if (text.length > MAX_TRANSLATE_LENGTH) {
-      console.log(`文本长度超过${MAX_TRANSLATE_LENGTH}，进行分段翻译`);
-      
-      // 按句子分割文本（更智能的分割）
-      const sentences = text.split(/(?<=[.!?。！？])\s+/);
-      let result = '';
-      let currentBatch = '';
-      
-      for (const sentence of sentences) {
-        // 如果当前批次加上新句子超过限制，先翻译当前批次
-        if (currentBatch.length + sentence.length > MAX_TRANSLATE_LENGTH) {
-          if (currentBatch.length > 0) {
-            const translated = await translateText(currentBatch);
-            result += translated;
-            currentBatch = '';
-            
-            // 增加随机延迟，避免过快请求API
-            const randomDelay = TRANSLATE_DELAY + Math.floor(Math.random() * 2000);
-            console.log(`添加随机延迟 ${randomDelay}ms 避免请求过快`);
-            await new Promise(resolve => setTimeout(resolve, randomDelay));
-          }
-        }
-        
-        currentBatch += sentence + ' ';
-      }
-      
-      // 翻译最后一批
-      if (currentBatch.length > 0) {
-        const translated = await translateText(currentBatch);
-        result += translated;
-      }
-      
-      return result;
-    }
-    
-    // 根据配置选择翻译API
-    try {
-      switch (TRANSLATOR_API.toUpperCase()) {
-        case 'SILICONFLOW':
-          console.log(`使用硅基流动API翻译...`);
-          return await translateWithSiliconFlow(text);
-        
-        case 'DEEPSEEK':
-          console.log(`使用DeepSeek官方API翻译...`);
-          return await translateWithDeepSeek(text);
-          
-        case 'GOOGLE':
-          console.log(`使用Google翻译API...`);
-          return await translateWithGoogle(text);
-          
-        case 'SIMULATE':
-          console.log(`使用模拟翻译...`);
-          return simulateTranslation(text);
-          
-        default:
-          // 默认使用模拟翻译，避免API费用
-          console.log(`未指定有效的翻译API，使用模拟翻译...`);
-          return simulateTranslation(text);
-      }
-    } catch (apiError) {
-      // 记录具体错误
-      console.warn(`翻译API调用失败: ${apiError.message}`);
-      
-      // 直接使用模拟翻译作为备选
-      console.log(`使用模拟翻译作为备选方案`);
-      return simulateTranslation(text);
-    }
-  } catch (error) {
-    console.error(`翻译失败: ${error.message}`);
-    
-    // 如果是请求限制错误，进行重试
-    if ((error.message.includes('Too Many Requests') || error.message.includes('429')) 
-        && retryCount < MAX_RETRY_ATTEMPTS) {
-      const retryDelay = RETRY_DELAY_BASE * Math.pow(2, retryCount); // 指数退避
-      console.log(`遇到请求限制，${retryDelay}ms 后第 ${retryCount + 1} 次重试...`);
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
-      return translateText(text, retryCount + 1);
-    }
-    
-    // 达到最大重试次数或其他错误，使用模拟翻译
-    console.warn(`达到最大重试次数或遇到其他错误，使用模拟翻译`);
-    return simulateTranslation(text);
-  }
-}
-
-/**
- * 简单的模拟翻译，返回双语内容以保留原文
- * @param {string} text - 原始文本
- * @returns {string} - 模拟翻译的文本
- */
-function simulateTranslation(text) {
-  // 常见英文单词和短语的简单中文对应(扩展词典)
-  const simpleDictionary = {
-    // 基础词汇
+  // 创建简单的英文词汇到中文的映射
+  const dictionary = {
+    // 常用词汇
     'the': '这个',
     'a': '一个',
     'an': '一个',
@@ -327,316 +497,808 @@ function simulateTranslation(text) {
     'those': '那些',
     'there': '那里',
     'here': '这里',
-    'when': '当',
-    'where': '哪里',
-    'why': '为什么',
-    'how': '如何',
-    'what': '什么',
-    'who': '谁',
-    'which': '哪个',
-    'will': '将会',
-    'would': '会',
-    'could': '可能会',
-    'should': '应该',
-    'can': '能够',
-    'may': '可能',
-    'might': '可能',
-    'must': '必须',
+    'all': '所有',
     'have': '有',
     'has': '有',
     'had': '有',
     'do': '做',
     'does': '做',
     'did': '做',
-    'been': '曾是',
-    'being': '正在',
-    'be': '是',
-    'was': '是',
-    'were': '是',
-    'more': '更多',
-    'most': '最多',
-    'some': '一些',
-    'any': '任何',
-    'no': '没有',
-    'all': '所有',
-    'many': '许多',
-    'much': '很多',
-    'few': '几个',
-    'little': '一点',
-    'other': '其他',
-    'another': '另一个',
-    'such': '这样的',
-    'so': '如此',
-    'than': '比',
-    'then': '然后',
-    'thus': '因此',
-    'though': '虽然',
-    'although': '尽管',
-    'if': '如果',
-    'unless': '除非',
-    'while': '当...时',
-    'because': '因为',
-    'since': '自从',
-    'until': '直到',
-    'after': '之后',
-    'before': '之前',
-    'during': '期间',
-    'under': '在...下',
-    'over': '超过',
-    'through': '通过',
-    'throughout': '遍及',
-    'between': '之间',
-    'among': '在...之中',
-    'within': '在...之内',
-    'without': '没有',
-    'about': '关于',
-    'against': '反对',
-    'around': '围绕',
-    'beyond': '超出',
-    'across': '穿过',
-    'along': '沿着',
-    'upon': '在...之上',
-    'next': '下一个',
-    'previous': '前一个',
-    'last': '最后',
-    'first': '第一',
-    'second': '第二',
-    'third': '第三',
+    'will': '将会',
+    'would': '会',
+    'could': '可能会',
+    'should': '应该',
+    'can': '能够',
+    'may': '可能',
     
-    // 学术文章常用词汇
-    'introduction': '介绍',
-    'chapter': '章节',
-    'section': '部分',
-    'book': '书',
-    'page': '页面',
-    'example': '示例',
-    'content': '内容',
-    'reference': '参考',
-    'author': '作者',
-    'title': '标题',
-    'figure': '图',
-    'table': '表',
-    'image': '图像',
-    'note': '注释',
-    'summary': '总结',
-    'conclusion': '结论',
-    'information': '信息',
-    'data': '数据',
-    'research': '研究',
-    'analysis': '分析',
-    'theory': '理论',
-    'method': '方法',
-    'process': '过程',
-    'result': '结果',
-    'discussion': '讨论',
-    'study': '研究',
-    'experiment': '实验',
-    'observation': '观察',
-    'measurement': '测量',
-    'calculation': '计算',
-    'evidence': '证据',
-    'argument': '论点',
-    'hypothesis': '假设',
-    'conclusion': '结论',
-    'findings': '发现',
-    'abstract': '摘要',
-    'publication': '出版物',
-    'journal': '期刊',
-    'article': '文章',
-    'citation': '引用',
-    'bibliography': '参考文献',
-    'appendix': '附录',
-    'footnote': '脚注',
-    'glossary': '术语表',
-    'preface': '前言',
-    'foreword': '序言',
-    'acknowledgment': '致谢',
-    'index': '索引',
-    
-    // 科技相关
-    'computer': '计算机',
-    'software': '软件',
-    'hardware': '硬件',
-    'program': '程序',
-    'system': '系统',
-    'network': '网络',
-    'internet': '互联网',
-    'technology': '技术',
-    'device': '设备',
-    'application': '应用',
-    'code': '代码',
-    'file': '文件',
-    'memory': '内存',
-    'storage': '存储',
-    'processor': '处理器',
-    'algorithm': '算法',
-    'database': '数据库',
-    'user': '用户',
-    'interface': '界面',
-    'digital': '数字的',
-    'electronic': '电子的',
-    'intelligence': '智能',
-    'artificial': '人工的',
-    
-    // 场景相关
-    'time': '时间',
-    'year': '年',
-    'month': '月',
-    'day': '日',
-    'hour': '小时',
-    'minute': '分钟',
-    'second': '秒',
-    'today': '今天',
-    'tomorrow': '明天',
-    'yesterday': '昨天',
-    'world': '世界',
-    'country': '国家',
-    'city': '城市',
-    'place': '地方',
-    'home': '家',
-    'office': '办公室',
-    'building': '建筑',
-    'room': '房间',
-    'door': '门',
-    'window': '窗户',
-    'wall': '墙',
-    'floor': '地板',
-    'ceiling': '天花板',
-    'road': '道路',
-    'street': '街道',
-    'path': '路径',
-    'car': '汽车',
-    'train': '火车',
-    'plane': '飞机',
-    'boat': '船',
-    'bus': '公交车',
-    'bike': '自行车',
-    'walk': '走路',
-    'run': '跑步',
+    // 专业词汇
+    'animal': '动物',
+    'kingdom': '王国',
+    'diversity': '多样性',
+    'remarkable': '显著的',
+    'varied': '多样的',
+    'countless': '无数的',
+    'ways': '方式',
+    'conclude': '推断',
+    'little': '很少',
+    'almost': '几乎',
+    'body': '身体',
+    'plan': '计划',
+    'front': '前部',
+    'contains': '包含',
+    'mouth': '嘴巴',
+    'brain': '大脑',
+    'sensory': '感觉',
+    'organs': '器官',
+    'eyes': '眼睛',
+    'ears': '耳朵',
+    'back': '背部',
+    'waste': '废物',
+    'evolutionary': '进化的',
+    'biologists': '生物学家',
+    'bilateral': '双侧的',
+    'symmetry': '对称性',
+    'contrast': '对比',
+    'distant': '遥远的',
+    'cousins': '亲戚',
+    'coral': '珊瑚',
+    'polyps': '水螅',
+    'anemones': '海葵',
+    'jellyfish': '水母',
+    'radial': '辐射状的',
+    'arranged': '排列',
+    'central': '中心的',
+    'axis': '轴',
+    'difference': '差异',
+    'categories': '类别',
     'food': '食物',
-    'water': '水',
-    'air': '空气',
-    'light': '光',
-    'fire': '火',
-    'earth': '地球',
-    'sun': '太阳',
-    'moon': '月亮',
-    'star': '星星',
-    'sky': '天空'
+    'mouths': '嘴巴',
+    'pooping': '排泄',
+    'waste': '废物',
+    'products': '产物',
+    'butts': '臀部',
+    'animals': '动物',
+    'eat': '吃',
+    'putting': '放入',
+    'swallows': '吞咽',
+    'stomachs': '胃',
+    'spits': '吐出',
+    'proper': '适当的',
+    'bilaterians': '双侧对称动物',
+    'symmetrical': '对称的',
+    'opening': '开口',
+    'undeniably': '不可否认地'
   };
   
-  // 创建简单的替换
+  // 进行简单的词对词翻译
   let translatedText = text;
-  for (const [eng, chi] of Object.entries(simpleDictionary)) {
-    // 仅替换单词边界的完整单词，保持大小写
-    const regExpLower = new RegExp(`\\b${eng}\\b`, 'g');
-    const regExpCap = new RegExp(`\\b${eng.charAt(0).toUpperCase() + eng.slice(1)}\\b`, 'g');
-    
-    // 替换小写版本
-    translatedText = translatedText.replace(regExpLower, `${chi}`);
-    
-    // 替换首字母大写版本
-    translatedText = translatedText.replace(regExpCap, `${chi.charAt(0).toUpperCase() + chi.slice(1)}`);
-  }
+  Object.keys(dictionary).forEach(engWord => {
+    const regex = new RegExp(`\\b${engWord}\\b`, 'gi');
+    translatedText = translatedText.replace(regex, match => {
+      // 保持原始大小写
+      if (match === match.toLowerCase()) {
+        return dictionary[engWord];
+      } else if (match === match.toUpperCase()) {
+        return dictionary[engWord].toUpperCase();
+      } else if (match.charAt(0) === match.charAt(0).toUpperCase()) {
+        return dictionary[engWord].charAt(0).toUpperCase() + dictionary[engWord].slice(1);
+      }
+      return dictionary[engWord];
+    });
+  });
   
-  // 返回双语格式
-  return `${translatedText}\n【原文】${text}`;
+  // 返回翻译结果
+  return `【译文】${translatedText}`;
 }
 
 /**
  * 翻译HTML内容
- * @param {string} html - HTML内容
+ * @param {string} html - HTML内容字符串
+ * @param {function} progressCallback - 进度回调函数
  * @returns {Promise<string>} - 翻译后的HTML
  */
-async function translateHtml(html) {
+async function translateHtml(html, progressCallback = null) {
   try {
-    const $ = cheerio.load(html);
     console.log('开始翻译HTML内容...');
+    const $ = cheerio.load(html);
     
-    // 翻译标题
-    const title = $('title').text();
-    if (title) {
-      console.log(`翻译标题: ${title.substring(0, 30)}...`);
-      const translatedTitle = await translateText(title);
-      $('title').text(translatedTitle);
-      
-      // 标题翻译后添加额外延迟
-      await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY));
+    // 通知初始进度
+    if (typeof progressCallback === 'function') {
+      progressCallback(65, '解析HTML内容...');
     }
     
-    // 先计算需要翻译的段落数量
-    const paragraphs = $('p');
-    console.log(`需要翻译 ${paragraphs.length} 个段落`);
+    // 按章节处理而不是单独元素
+    // 查找所有章节容器 - 大多数电子书使用div或section标签包装章节
+    const chapters = $('body > div, body > section, .chapter, [id^="chapter"], [class*="chapter"]');
+    console.log(`找到 ${chapters.length} 个潜在章节容器`);
     
-    // 分批翻译段落，每批10个段落
-    const BATCH_SIZE = 5; // 减小批量大小
+    if (chapters.length === 0) {
+      // 如果没有找到明确的章节，尝试使用标题作为分割点
+      return await fallbackTranslateByHeadings($, html, progressCallback);
+    }
     
-    for (let i = 0; i < paragraphs.length; i += BATCH_SIZE) {
-      console.log(`翻译段落批次 ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(paragraphs.length/BATCH_SIZE)}`);
+    // 总章节数量
+    const totalChapters = chapters.length;
+    let processedCount = 0;
+    
+    // 处理每个章节
+    for (let i = 0; i < chapters.length; i++) {
+      const chapter = chapters.eq(i);
+      const chapterTitle = chapter.find('h1, h2, h3').first().text().trim() || `章节 ${i+1}`;
       
-      // 每批次间额外延迟
-      if (i > 0) {
-        const batchDelay = TRANSLATE_DELAY * 2;
-        console.log(`批次间等待 ${batchDelay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, batchDelay));
+      // 更新进度
+      if (typeof progressCallback === 'function') {
+        const progress = 65 + Math.floor((processedCount / totalChapters) * 20);
+        progressCallback(progress, `翻译章节: ${chapterTitle} (${processedCount}/${totalChapters})...`);
       }
       
-      // 处理当前批次
-      const end = Math.min(i + BATCH_SIZE, paragraphs.length);
-      for (let j = i; j < end; j++) {
-        const p = paragraphs.eq(j);
-        const text = p.text();
+      // 获取章节中所有需要翻译的元素
+      const elementsToTranslate = chapter.find('h1, h2, h3, h4, h5, h6, p, li').filter(function() {
+        const text = $(this).text().trim();
+        // 只处理有文本内容且不是仅包含数字或特殊字符的元素
+        return text.length > 0 && /[a-zA-Z]{5,}/.test(text);
+      });
+      
+      console.log(`章节 "${chapterTitle}" 中找到 ${elementsToTranslate.length} 个需要翻译的元素`);
+      
+      if (elementsToTranslate.length === 0) {
+        continue; // 跳过空章节
+      }
+      
+      // 章节中的所有文本内容合并处理，提高效率
+      let chapterText = '';
+      const elementMappings = [];
+      
+      // 为每个元素创建唯一标识符
+      elementsToTranslate.each(function(index) {
+        const element = $(this);
+        const text = element.text().trim();
         
-        if (text && text.trim() !== '') {
+        if (text.length > 0) {
+          // 使用索引创建唯一标记
+          const marker = `[ELEMENT_${i}_${index}]`;
+          chapterText += marker + text + marker + '\n\n';
+          
+          elementMappings.push({
+            marker: marker,
+            element: element,
+            originalText: text
+          });
+        }
+      });
+      
+      // 检查是否有内容需要翻译
+      if (chapterText.trim() === '') {
+        continue;
+      }
+      
+      console.log(`批量翻译章节 "${chapterTitle}"，共 ${chapterText.length} 个字符`);
+      
+      // 如果章节内容过长，分段处理
+      if (chapterText.length > BATCH_CHAR_LIMIT) {
+        console.log(`章节内容超过字符限制(${BATCH_CHAR_LIMIT})，分段处理`);
+        await processChapterInSegments($, chapterText, elementMappings, BATCH_CHAR_LIMIT);
+      } else {
+        // 整体翻译章节内容
+        try {
+          console.log(`整体翻译章节，长度: ${chapterText.length}`);
+          const translatedChapterText = await translateText(chapterText);
+          
+          // 将翻译结果应用到各个元素
+          for (const mapping of elementMappings) {
+            // 提取对应元素的翻译内容
+            const pattern = new RegExp(escapeRegExp(mapping.marker) + '(.*?)' + escapeRegExp(mapping.marker), 's');
+            const match = translatedChapterText.match(pattern);
+            
+            if (match && match[1]) {
+              const translatedElementText = match[1].trim();
+              
+              // 更好的双语格式: 中文(原文: 英文)
+              if (translatedElementText.includes('【原文】')) {
+                $(mapping.element).html(translatedElementText);
+              } else {
+                // 添加原文作为参考
+                $(mapping.element).html(`${translatedElementText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+              }
+            } else {
+              console.warn(`未找到元素 "${mapping.originalText.substring(0, 30)}..." 的翻译结果，使用模拟翻译`);
+              const simText = simulateTranslation(mapping.originalText);
+              $(mapping.element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+            }
+          }
+        } catch (error) {
+          console.error(`章节翻译失败: ${error.message}，使用备用方法`);
+          // 错误时逐个翻译重要元素
+          await translateChapterElements($, elementsToTranslate);
+        }
+      }
+      
+      processedCount++;
+      
+      // 章节之间添加延迟
+      if (i < chapters.length - 1) {
+        console.log(`已处理 ${processedCount}/${totalChapters} 个章节，等待处理下一章节...`);
+        await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY / 2));
+      }
+    }
+    
+    // 通知进度完成
+    if (typeof progressCallback === 'function') {
+      progressCallback(85, 'HTML翻译完成，准备生成PDF...');
+    }
+    
+    console.log('HTML翻译完成');
+    return $.html();
+  } catch (error) {
+    console.error(`HTML翻译失败: ${error.message}`);
+    
+    // 失败时也要通知进度
+    if (typeof progressCallback === 'function') {
+      progressCallback(70, `翻译失败: ${error.message}`);
+    }
+    
+    // 发生错误时返回原始HTML
+    return html;
+  }
+}
+
+/**
+ * 按照标题分段翻译HTML内容(备用方法)
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {string} html - 原始HTML内容 
+ * @param {function} progressCallback - 进度回调函数
+ * @returns {Promise<string>} - 翻译后的HTML
+ */
+async function fallbackTranslateByHeadings($, html, progressCallback) {
+  console.log('使用标题分段翻译模式');
+  
+  // 查找所有标题元素
+  const headings = $('h1, h2, h3, h4');
+  console.log(`找到 ${headings.length} 个标题元素作为分段点`);
+  
+  if (headings.length === 0) {
+    // 如果没有标题，使用原始方法
+    console.log('没有找到标题元素，使用原始元素翻译方法');
+    return await originalTranslateHtml(html, progressCallback);
+  }
+  
+  // 收集各个部分并处理
+  let currentHeading = null;
+  let currentSection = [];
+  const sections = [];
+  
+  headings.each(function(i) {
+    if (currentHeading !== null) {
+      // 收集当前标题下的所有元素
+      let elem = currentHeading;
+      while (elem.next().length && !elem.next().is('h1, h2, h3, h4')) {
+        elem = elem.next();
+        if (elem.is('p, li') && elem.text().trim().length > 0) {
+          currentSection.push(elem);
+        }
+      }
+      
+      sections.push({
+        heading: currentHeading,
+        elements: currentSection
+      });
+    }
+    
+    currentHeading = $(this);
+    currentSection = [];
+  });
+  
+  // 处理最后一个部分
+  if (currentHeading !== null) {
+    let elem = currentHeading;
+    while (elem.next().length) {
+      elem = elem.next();
+      if (elem.is('p, li') && elem.text().trim().length > 0) {
+        currentSection.push(elem);
+      }
+    }
+    
+    sections.push({
+      heading: currentHeading,
+      elements: currentSection
+    });
+  }
+  
+  console.log(`共分割为 ${sections.length} 个内容部分`);
+  
+  // 翻译每个部分
+  for (let i = 0; i < sections.length; i++) {
+    const section = sections[i];
+    const headingText = section.heading.text().trim();
+    
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      const progress = 65 + Math.floor((i / sections.length) * 20);
+      progressCallback(progress, `翻译部分: ${headingText} (${i+1}/${sections.length})...`);
+    }
+    
+    // 翻译标题
+    try {
+      const translatedHeading = await translateText(headingText);
+      if (translatedHeading.includes('【原文】')) {
+        section.heading.html(translatedHeading);
+      } else {
+        section.heading.html(`${translatedHeading}<br><span style="font-size:0.9em;color:#666">【原文】${headingText}</span>`);
+      }
+    } catch (error) {
+      console.warn(`标题翻译失败: ${error.message}`);
+    }
+    
+    // 处理整个部分的文本
+    if (section.elements.length > 0) {
+      // 合并段落文本
+      let sectionText = '';
+      const elementMappings = [];
+      
+      section.elements.forEach((element, index) => {
+        const text = $(element).text().trim();
+        if (text.length > 0) {
+          const marker = `[ELEMENT_${i}_${index}]`;
+          sectionText += marker + text + marker + '\n\n';
+          elementMappings.push({
+            marker: marker,
+            element: element,
+            originalText: text
+          });
+        }
+      });
+      
+      // 批量翻译内容
+      if (sectionText.length > 0) {
+        if (sectionText.length > BATCH_CHAR_LIMIT) {
+          await processChapterInSegments($, sectionText, elementMappings, BATCH_CHAR_LIMIT);
+        } else {
           try {
-            // 只记录较短的文本片段
-            const logText = text.length > 50 ? text.substring(0, 50) + '...' : text;
-            console.log(`翻译段落 ${j+1}/${paragraphs.length}: ${logText}`);
+            const translatedSectionText = await translateText(sectionText);
             
-            const translatedText = await translateText(text);
-            p.text(translatedText);
-            
-            // 每个段落之间添加随机延迟
-            const randomDelay = TRANSLATE_DELAY + Math.floor(Math.random() * 1000);
-            await new Promise(resolve => setTimeout(resolve, randomDelay));
-          } catch (pError) {
-            console.error(`翻译段落失败: ${pError.message}`);
-            // 继续处理下一个段落
-            continue;
+            // 应用翻译结果
+            for (const mapping of elementMappings) {
+              const pattern = new RegExp(escapeRegExp(mapping.marker) + '(.*?)' + escapeRegExp(mapping.marker), 's');
+              const match = translatedSectionText.match(pattern);
+              
+              if (match && match[1]) {
+                const translatedElementText = match[1].trim();
+                if (translatedElementText.includes('【原文】')) {
+                  $(mapping.element).html(translatedElementText);
+                } else {
+                  $(mapping.element).html(`${translatedElementText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+                }
+              } else {
+                const simText = simulateTranslation(mapping.originalText);
+                $(mapping.element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+              }
+            }
+          } catch (error) {
+            console.warn(`部分翻译失败: ${error.message}`);
+            await translateElements($, section.elements);
           }
         }
       }
     }
     
-    // 翻译标题元素（h1-h6）
-    const headings = $('h1, h2, h3, h4, h5, h6');
-    console.log(`需要翻译 ${headings.length} 个标题元素`);
+    // 部分之间添加延迟
+    if (i < sections.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY / 2));
+    }
+  }
+  
+  // 通知进度完成
+  if (typeof progressCallback === 'function') {
+    progressCallback(85, 'HTML翻译完成，准备生成PDF...');
+  }
+  
+  return $.html();
+}
+
+/**
+ * 分段处理大型章节内容
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {string} chapterText - 章节文本
+ * @param {Array<Object>} elementMappings - 元素映射
+ * @param {number} segmentLimit - 分段大小限制
+ */
+async function processChapterInSegments($, chapterText, elementMappings, segmentLimit) {
+  // 按元素分割章节内容
+  const segments = [];
+  let currentSegment = '';
+  let currentMappings = [];
+  
+  for (const mapping of elementMappings) {
+    const elementText = mapping.marker + mapping.originalText + mapping.marker + '\n\n';
     
-    for (let i = 0; i < headings.length; i++) {
-      const h = headings.eq(i);
-      const text = h.text();
+    // 如果添加这个元素会超出限制，开始新的段落
+    if (currentSegment.length + elementText.length > segmentLimit && currentSegment.length > 0) {
+      segments.push({
+        text: currentSegment,
+        mappings: currentMappings
+      });
+      currentSegment = '';
+      currentMappings = [];
+    }
+    
+    currentSegment += elementText;
+    currentMappings.push(mapping);
+  }
+  
+  // 添加最后一个段落
+  if (currentSegment.length > 0) {
+    segments.push({
+      text: currentSegment,
+      mappings: currentMappings
+    });
+  }
+  
+  console.log(`章节内容分为 ${segments.length} 个片段进行处理`);
+  
+  // 处理每个片段
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    console.log(`处理片段 ${i+1}/${segments.length}，包含 ${segment.mappings.length} 个元素，共 ${segment.text.length} 个字符`);
+    
+    try {
+      const translatedSegmentText = await translateText(segment.text);
       
-      if (text && text.trim() !== '') {
+      // 应用翻译结果
+      for (const mapping of segment.mappings) {
+        const pattern = new RegExp(escapeRegExp(mapping.marker) + '(.*?)' + escapeRegExp(mapping.marker), 's');
+        const match = translatedSegmentText.match(pattern);
+        
+        if (match && match[1]) {
+          const translatedElementText = match[1].trim();
+          if (translatedElementText.includes('【原文】')) {
+            $(mapping.element).html(translatedElementText);
+          } else {
+            $(mapping.element).html(`${translatedElementText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+          }
+        } else {
+          console.warn(`无法找到元素 "${mapping.originalText.substring(0, 30)}..." 的翻译，使用模拟翻译`);
+          const simText = simulateTranslation(mapping.originalText);
+          $(mapping.element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+        }
+      }
+    } catch (error) {
+      console.error(`片段翻译失败: ${error.message}`);
+      
+      // 逐个翻译元素
+      for (const mapping of segment.mappings) {
         try {
-          console.log(`翻译标题元素 ${i+1}/${headings.length}: ${text.substring(0, 30)}...`);
-          const translatedText = await translateText(text);
-          h.text(translatedText);
+          const translatedText = await translateText(mapping.originalText);
+          if (translatedText.includes('【原文】')) {
+            $(mapping.element).html(translatedText);
+          } else {
+            $(mapping.element).html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+          }
+        } catch (elemError) {
+          console.warn(`元素翻译失败: ${elemError.message}`);
+          const simText = simulateTranslation(mapping.originalText);
+          $(mapping.element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+        }
+        
+        // 添加短暂延迟
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    // 片段之间添加延迟
+    if (i < segments.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY / 2));
+    }
+  }
+}
+
+/**
+ * 翻译元素集合
+ * @param {CheerioStatic} $ - Cheerio对象 
+ * @param {Array<Element>} elements - 要翻译的元素
+ */
+async function translateElements($, elements) {
+  for (let i = 0; i < elements.length; i++) {
+    const element = elements[i];
+    const text = $(element).text().trim();
+    
+    if (text.length > 0) {
+      try {
+        const translatedText = await translateText(text);
+        if (translatedText.includes('【原文】')) {
+          $(element).html(translatedText);
+        } else {
+          $(element).html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${text}</span>`);
+        }
+      } catch (error) {
+        console.warn(`元素翻译失败: ${error.message}`);
+        const simText = simulateTranslation(text);
+        $(element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+      }
+      
+      // 添加短暂延迟
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+}
+
+/**
+ * 翻译章节内的所有元素
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {Array<Element>} elements - 要翻译的元素
+ */
+async function translateChapterElements($, elements) {
+  return await translateElements($, elements);
+}
+
+/**
+ * 用于正则表达式转义特殊字符
+ * @param {string} string - 需要转义的字符串
+ * @returns {string} - 转义后的字符串
+ */
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 原始的逐元素翻译方法(兼容备用)
+ * @param {string} html - HTML内容
+ * @param {function} progressCallback - 进度回调函数
+ * @returns {Promise<string>} - 翻译后的HTML
+ */
+async function originalTranslateHtml(html, progressCallback = null) {
+  const $ = cheerio.load(html);
+  
+  // 获取所有需要翻译的元素
+  const elements = $('h1, h2, h3, h4, h5, h6, p, li').filter(function() {
+    const text = $(this).text().trim();
+    // 只处理有文本内容且不是仅包含数字或特殊字符的元素
+    return text.length > 0 && /[a-zA-Z]{5,}/.test(text);
+  });
+  
+  console.log(`找到 ${elements.length} 个需要翻译的元素`);
+  
+  if (elements.length === 0) {
+    console.log('没有找到需要翻译的元素，返回原HTML');
+    return html;
+  }
+  
+  // 总元素数量
+  const totalElements = elements.length;
+  let processedCount = 0;
+  
+  // 更大的批量大小，提高效率
+  const BATCH_SIZE = 5; // 从2增加到5
+  
+  // 分批处理元素
+  for (let i = 0; i < elements.length; i += BATCH_SIZE) {
+    // 获取当前批次
+    const batch = elements.slice(i, Math.min(i + BATCH_SIZE, elements.length));
+    
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      const progress = 65 + Math.floor((processedCount / totalElements) * 20);
+      progressCallback(progress, `翻译中 (${processedCount}/${totalElements})...`);
+    }
+    
+    // 处理当前批次
+    await translateBatch($, batch);
+    
+    processedCount += batch.length;
+    
+    // 每个批次之间等待较短时间，提高效率
+    if (i + BATCH_SIZE < elements.length) {
+      console.log(`已处理 ${processedCount}/${totalElements} 个元素，等待下一批...`);
+      const batchWaitTime = Math.max(TRANSLATE_DELAY/3, 1000);
+      console.log(`批次间等待 ${batchWaitTime}ms...`);
+      await new Promise(resolve => setTimeout(resolve, batchWaitTime));
+    }
+  }
+  
+  return $.html();
+}
+
+/**
+ * 批量翻译元素
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {Array} batch - 元素批次
+ */
+async function translateBatch($, batch) {
+  // 收集每个元素的文本并记录映射
+  const textsToTranslate = [];
+  const elementMappings = [];
+  let batchCharCount = 0; // 跟踪批次总字符数
+  
+  for (let j = 0; j < batch.length; j++) {
+    const element = batch.eq(j);
+    const originalText = element.text().trim();
+    
+    if (originalText.length > 0) {
+      // 计算批次字符总数，确保不超过API限制
+      if (batchCharCount + originalText.length > BATCH_CHAR_LIMIT) {
+        // 如果添加这个元素会超出限制，结束当前批次
+        console.log(`批次达到字符限制 ${batchCharCount}/${BATCH_CHAR_LIMIT}，停止添加更多元素`);
+        break;
+      }
+      
+      textsToTranslate.push(originalText);
+      elementMappings.push({
+        element: element, 
+        originalText: originalText
+      });
+      batchCharCount += originalText.length;
+    }
+  }
+  
+  // 防止空批次
+  if (textsToTranslate.length === 0) {
+    return;
+  }
+  
+  // 使用不容易出现在正常文本中的随机生成分隔符
+  const timestamp = Date.now();
+  const randomString = Math.random().toString(36).substring(2, 10);
+  const SEPARATOR = `\n##--SPLIT_MARK_${timestamp}_${randomString}--##\n`;
+  
+  console.log(`批量翻译 ${textsToTranslate.length} 个元素，共 ${batchCharCount} 个字符`);
+  
+  // 两种翻译策略: 尝试批量翻译，如果失败则回退到单个翻译
+  if (textsToTranslate.length > 1) {
+    try {
+      // 1. 尝试批量翻译
+      const combinedText = textsToTranslate.join(SEPARATOR);
+      const translatedCombined = await translateText(combinedText);
+      const translatedParts = translatedCombined.split(SEPARATOR);
+      
+      // 验证拆分结果
+      if (translatedParts.length === textsToTranslate.length) {
+        // 应用翻译结果
+        for (let k = 0; k < elementMappings.length; k++) {
+          const mapping = elementMappings[k];
+          const translatedText = translatedParts[k].trim();
           
-          // 每个标题后添加延迟
-          await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY));
-        } catch (hError) {
-          console.error(`翻译标题元素失败: ${hError.message}`);
-          continue;
+          // 更好的双语格式: 中文(原文: 英文)
+          if (translatedText.includes('【原文】')) {
+            $(mapping.element).html(translatedText);
+          } else {
+            // 添加原文作为参考
+            $(mapping.element).html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+          }
+        }
+        console.log(`批次翻译成功，应用到 ${elementMappings.length} 个元素`);
+      } else {
+        throw new Error(`翻译结果拆分不匹配: 期望 ${textsToTranslate.length} 个部分，实际得到 ${translatedParts.length} 个部分`);
+      }
+    } catch (batchError) {
+      console.warn(batchError.message);
+      console.warn(`批量翻译失败，退回到单个元素翻译`);
+      
+      // 2. 批量失败，回退到逐个翻译
+      for (const mapping of elementMappings) {
+        try {
+          console.log(`单独翻译: ${mapping.originalText.substring(0, 50)}${mapping.originalText.length > 50 ? '...' : ''}`);
+          const translatedText = await translateText(mapping.originalText);
+          
+          // 更好的双语格式
+          if (translatedText.includes('【原文】')) {
+            $(mapping.element).html(translatedText);
+          } else {
+            $(mapping.element).html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+          }
+          
+          // 避免请求过快，添加延迟
+          await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY / 2));
+        } catch (singleError) {
+          console.warn(`单独翻译元素失败: ${singleError.message}，使用模拟翻译`);
+          const simText = simulateTranslation(mapping.originalText);
+          $(mapping.element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+        }
+      }
+    }
+  } else {
+    // 单个元素处理
+    const mapping = elementMappings[0];
+    try {
+      console.log(`翻译单个元素: ${mapping.originalText.substring(0, 50)}${mapping.originalText.length > 50 ? '...' : ''}`);
+      const translatedText = await translateText(mapping.originalText);
+      
+      // 更好的双语格式
+      if (translatedText.includes('【原文】')) {
+        $(mapping.element).html(translatedText);
+      } else {
+        $(mapping.element).html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${mapping.originalText}</span>`);
+      }
+    } catch (error) {
+      console.warn(`翻译元素失败: ${error.message}，使用模拟翻译`);
+      const simText = simulateTranslation(mapping.originalText);
+      $(mapping.element).html(simText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+    }
+  }
+}
+
+/**
+ * 处理一个翻译批次，并更新进度
+ * @param {Array<string>} textBatch - 一批要翻译的文本
+ * @param {Array<Object>} elementMappings - 元素映射信息
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {function} progressCallback - 进度回调函数
+ * @param {number} processedCount - 已处理元素数
+ * @param {number} totalElements - 总元素数
+ */
+async function processBatchWithProgress(textBatch, elementMappings, $, progressCallback, processedCount, totalElements) {
+  try {
+    if (textBatch.length === 0) return;
+    
+    // 使用非常独特的分隔符，即使在翻译中也不太可能被改变
+    const SEPARATOR = "\n###SPLIT_MARK_" + Date.now() + "###\n";
+    const combinedText = textBatch.join(SEPARATOR);
+    
+    console.log(`批量翻译 ${textBatch.length} 个元素，共 ${combinedText.length} 个字符`);
+    
+    // 翻译合并后的文本
+    const translatedCombined = await translateText(combinedText);
+    
+    // 根据分隔符拆分翻译结果
+    const translatedParts = translatedCombined.split(SEPARATOR);
+    
+    // 确保结果数量与输入匹配
+    if (translatedParts.length === textBatch.length) {
+      // 将翻译结果应用回各个元素
+      for (let i = 0; i < elementMappings.length; i++) {
+        const mapping = elementMappings[i];
+        $(mapping.element).text(translatedParts[i]);
+      }
+      console.log(`批次翻译完成，成功应用回 ${elementMappings.length} 个元素`);
+    } else {
+      console.warn(`翻译结果拆分不匹配: 期望 ${textBatch.length} 个部分，实际得到 ${translatedParts.length} 个部分`);
+      
+      // 单独翻译每个元素
+      for (let i = 0; i < elementMappings.length; i++) {
+        const mapping = elementMappings[i];
+        const originalText = $(mapping.element).text();
+        
+        try {
+          // 直接对每个元素进行单独翻译
+          const translatedText = await translateText(originalText);
+          $(mapping.element).text(translatedText);
+          
+          // 更新进度（从30%到85%的进度范围内）
+          if (typeof progressCallback === 'function') {
+            const currentElementIndex = processedCount + i;
+            const progress = 30 + Math.floor((currentElementIndex / totalElements) * 55);
+            if (i % 5 === 0 || i === elementMappings.length - 1) { // 每5个元素更新一次进度
+              progressCallback(progress, `已翻译 ${currentElementIndex+1}/${totalElements} 个元素...`);
+            }
+          }
+          
+          // 添加短延迟
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (err) {
+          console.error(`单独翻译元素失败: ${err.message}`);
+          // 失败时使用模拟翻译
+          $(mapping.element).text(simulateTranslation(originalText));
         }
       }
     }
     
-    console.log('HTML内容翻译完成');
-    return $.html();
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      const progress = 30 + Math.floor(((processedCount + textBatch.length) / totalElements) * 55);
+      progressCallback(progress, `已翻译 ${processedCount + textBatch.length}/${totalElements} 个元素...`);
+    }
   } catch (error) {
-    console.error(`HTML翻译失败: ${error.message}`);
-    // 失败时返回原HTML
-    return html;
+    console.error(`批次处理失败: ${error.message}`);
+    // 失败时使用模拟翻译
+    for (const mapping of elementMappings) {
+      const originalText = $(mapping.element).text();
+      const simText = simulateTranslation(originalText);
+      $(mapping.element).text(simText);
+    }
+    
+    // 即使失败也更新进度
+    if (typeof progressCallback === 'function') {
+      const progress = 30 + Math.floor(((processedCount + textBatch.length) / totalElements) * 55);
+      progressCallback(progress, `已翻译 ${processedCount + textBatch.length}/${totalElements} 个元素（使用离线翻译）...`);
+    }
   }
 }
 
@@ -872,106 +1534,315 @@ async function parseEpub(epubPath, tempDir, progressCallback = null) {
 
 /**
  * 将EPUB转换为PDF
- * @param {string} epubPath - EPUB文件路径
- * @param {string} outputPath - 输出PDF路径
- * @param {Function} progressCallback - 进度回调
- * @param {Object} options - 转换选项
- * @param {boolean} options.translate - 是否翻译内容
- * @returns {Promise<string>} - 输出PDF路径
+ * @param {string} epubPath - 输入EPUB文件路径
+ * @param {string} outputPdfPath - 输出PDF文件路径
+ * @param {Function} progressCallback - 进度回调函数
+ * @param {Object} options - 其他选项
+ * @returns {Promise<string>} - 转换后的PDF文件路径
  */
-async function convertEpubToPdf(epubPath, outputPath, progressCallback = null, options = {}) {
-  const tempDir = options.tempDir || path.join(os.tmpdir(), 'epub2pdf', uuidv4());
-  let cleanupNeeded = !options.keepTemp;
-  const shouldTranslate = options.translate === true;
-  
+async function convertEpubToPdf(epubPath, outputPdfPath, progressCallback = null, options = {}) {
   try {
-    console.log(`开始转换EPUB到PDF: ${epubPath} -> ${outputPath}`);
-    console.log(`翻译选项: ${shouldTranslate ? '启用' : '禁用'}`);
-    if (typeof progressCallback === 'function') progressCallback(0, '开始转换');
+    console.log(`开始将EPUB转换为PDF: ${epubPath} -> ${outputPdfPath}`);
+    const startTime = Date.now();
     
     // 创建临时目录
+    const tempDir = path.dirname(outputPdfPath);
     await fs.mkdir(tempDir, { recursive: true });
-    console.log(`创建临时目录: ${tempDir}`);
     
-    // 预处理EPUB文件
+    // 1. 预处理EPUB文件
+    if (typeof progressCallback === 'function') progressCallback(5, '预处理EPUB文件...');
+    console.log('1. 预处理EPUB文件...');
     await preprocessEpub(epubPath, tempDir);
-    if (typeof progressCallback === 'function') progressCallback(0.05, 'EPUB文件预处理完成');
     
-    // 解析EPUB文件
-    const epubContent = await parseEpub(epubPath, tempDir, progressCallback);
+    // 2. 解析EPUB内容
+    if (typeof progressCallback === 'function') progressCallback(10, '解析EPUB内容...');
+    console.log('2. 解析EPUB内容...');
+    let epubContent = await parseEpub(epubPath, tempDir, progressCallback);
     
-    if (!epubContent || !epubContent.htmlFiles || epubContent.htmlFiles.length === 0) {
-      throw new Error('未能提取任何有效的HTML内容，请检查EPUB文件格式');
-    }
-    
-    console.log(`EPUB解析完成，提取了 ${epubContent.htmlFiles.length} 个HTML文件`);
-    if (typeof progressCallback === 'function') progressCallback(0.4, '创建合并HTML文件');
-    
-    // 创建合并的HTML文件
-    const consolidatedHtmlPath = await createConsolidatedHtml(epubContent, tempDir);
-    console.log(`已创建合并HTML: ${consolidatedHtmlPath}`);
-    if (typeof progressCallback === 'function') progressCallback(0.6, '合并HTML文件创建完成');
-    
-    // 根据选项判断是否需要翻译
-    if (shouldTranslate) {
-      if (typeof progressCallback === 'function') progressCallback(0.65, '开始翻译内容...');
+    if (!epubContent) {
+      console.error('解析EPUB失败，尝试直接提取');
+      await extractEpubDirectly(epubPath, path.join(tempDir, 'extracted'));
       
-      try {
-        // 读取合并的HTML内容
-        const htmlContent = await fs.readFile(consolidatedHtmlPath, 'utf-8');
-        
-        // 翻译HTML内容
-        console.log(`开始翻译HTML内容...`);
-        
-        let translatedHtml;
-        try {
-          translatedHtml = await translateHtml(htmlContent);
-          console.log(`HTML内容翻译成功`);
-        } catch (translationError) {
-          console.error(`翻译处理出错: ${translationError.message}`);
-          
-          // 如果翻译出错，尝试使用备用的简单翻译方法
-          console.log(`尝试使用备用的简化翻译方法...`);
-          translatedHtml = await fallbackTranslateHtml(htmlContent);
+      // 重新尝试查找文件
+      const extractDir = path.join(tempDir, 'extracted');
+      const htmlFiles = [];
+      const cssFiles = [];
+      const imageFiles = [];
+      await findFiles(extractDir, htmlFiles, cssFiles, imageFiles, extractDir);
+      
+      epubContent = {
+        title: path.basename(epubPath, '.epub'),
+        htmlFiles: htmlFiles,
+        cssFiles: cssFiles,
+        imageFiles: imageFiles,
+        tocItems: []
+      };
+    }
+    
+    // 3. 创建合并的HTML文件
+    if (typeof progressCallback === 'function') progressCallback(50, '创建合并HTML文件...');
+    console.log('3. 创建合并HTML文件...');
+    const consolidatedHtmlPath = path.join(tempDir, 'consolidated.html');
+    
+    await createConsolidatedHtml(
+      epubContent.htmlFiles, 
+      epubContent.cssFiles, 
+      epubContent.imageFiles, 
+      epubContent.tocItems, 
+      tempDir
+    );
+    
+    console.log(`已创建合并HTML: ${consolidatedHtmlPath}`);
+    
+    // 新增：创建两个版本的输出文件
+    const originalPdfPath = outputPdfPath; // 原文PDF路径保持不变
+    const translationTxtPath = outputPdfPath.replace('.pdf', '_translation.txt'); // 翻译文件路径
+    
+    if (typeof progressCallback === 'function') progressCallback(65, '开始提取需要翻译的内容...');
+    
+    const htmlContent = await fs.readFile(consolidatedHtmlPath, 'utf8');
+    const translationMethod = TRANSLATOR_API.toUpperCase();
+    
+    try {
+      // 4. 生成原文PDF
+      if (typeof progressCallback === 'function') progressCallback(70, '生成原文PDF...');
+      console.log('4. 生成原文PDF...');
+      await convertHtmlToPdf(
+        consolidatedHtmlPath, 
+        originalPdfPath, 
+        (progress, message) => {
+          if (typeof progressCallback === 'function') {
+            // PDF生成阶段占70%-85%的进度
+            const overallProgress = 70 + Math.floor(progress * 15);
+            progressCallback(overallProgress, message);
+          }
         }
-        
-        // 将翻译后的内容写回文件
-        const translatedHtmlPath = path.join(tempDir, 'translated.html');
-        await fs.writeFile(translatedHtmlPath, translatedHtml, 'utf-8');
-        console.log(`已保存翻译后的HTML: ${translatedHtmlPath}`);
-        
-        if (typeof progressCallback === 'function') progressCallback(0.75, 'HTML翻译完成');
-        
-        // 转换翻译后的HTML为PDF
-        await convertHtmlToPdf(translatedHtmlPath, outputPath, progressCallback);
-      } catch (translationProcessError) {
-        console.error(`翻译过程失败: ${translationProcessError.message}，将直接转换原始HTML`);
-        // 如果翻译过程失败，转换原始HTML
-        await convertHtmlToPdf(consolidatedHtmlPath, outputPath, progressCallback);
+      );
+      
+      // 5. 生成单独的翻译文件
+      if (typeof progressCallback === 'function') progressCallback(85, '创建翻译文件...');
+      console.log('5. 创建翻译文件...');
+      
+      // 提取需要翻译的文本内容
+      const $ = cheerio.load(htmlContent);
+      
+      // 按章节组织翻译内容
+      let translationContent = `======== 《${epubContent.title || path.basename(epubPath, '.epub')}》翻译文本 ========\n\n`;
+      translationContent += `生成时间: ${new Date().toLocaleString()}\n\n`;
+      translationContent += `=========================\n\n`;
+      
+      // 生成目录部分
+      if (epubContent.tocItems && epubContent.tocItems.length > 0) {
+        translationContent += `## 目录\n\n`;
+        for (const tocItem of epubContent.tocItems) {
+          const indent = '  '.repeat(tocItem.level || 0);
+          translationContent += `${indent}- ${tocItem.title}\n`;
+        }
+        translationContent += `\n=========================\n\n`;
       }
-    } else {
-      // 直接转换原始HTML为PDF
-      await convertHtmlToPdf(consolidatedHtmlPath, outputPath, progressCallback);
+      
+      // 按章节提取和翻译内容 - 新的高效方法
+      console.log(`使用章节级批量处理方法生成翻译`);
+      
+      // 查找所有章节容器
+      const chapters = $('body > div, body > section, .chapter, [id^="chapter"], [class*="chapter"]');
+      console.log(`找到 ${chapters.length} 个潜在章节容器`);
+      
+      if (chapters.length === 0) {
+        // 如果没有找到明确的章节，尝试按顺序处理所有标题
+        await generateTranslationByHeadings($, translationMethod, translationContent, translationTxtPath, progressCallback);
+      } else {
+        // 处理每个章节
+        let processedChapters = 0;
+        const totalChapters = chapters.length;
+        
+        for (let i = 0; i < chapters.length; i++) {
+          const chapter = chapters.eq(i);
+          // 获取章节标题
+          const headingElement = chapter.find('h1, h2, h3').first();
+          const chapterTitle = headingElement.text().trim() || `章节 ${i+1}`;
+          
+          // 更新进度
+          if (typeof progressCallback === 'function') {
+            const progress = 85 + Math.floor((processedChapters / totalChapters) * 10);
+            progressCallback(progress, `处理章节 ${processedChapters+1}/${totalChapters}: ${chapterTitle}`);
+          }
+          
+          console.log(`处理章节: ${chapterTitle}`);
+          
+          // 获取章节中所有可翻译元素
+          const elementsToTranslate = chapter.find('h1, h2, h3, h4, h5, h6, p, li').filter(function() {
+            const text = $(this).text().trim();
+            return text.length > 0 && /[a-zA-Z]{5,}/.test(text);
+          });
+          
+          if (elementsToTranslate.length === 0) {
+            console.log(`章节 "${chapterTitle}" 中没有找到需要翻译的内容`);
+            continue;
+          }
+          
+          // 章节标题单独处理
+          let translatedTitle = '';
+          try {
+            translatedTitle = await translateText(chapterTitle, 0);
+            translatedTitle = translatedTitle.split('\n【原文】')[0]; // 只获取翻译部分
+          } catch (err) {
+            console.error(`章节标题翻译失败: ${err.message}`);
+            translatedTitle = simulateTranslation(chapterTitle).split('\n【原文】')[0];
+          }
+          
+          // 添加章节标题到翻译内容
+          translationContent += `## ${translatedTitle}\n\n`;
+          
+          // 合并本章节所有文本以批量翻译
+          let chapterTexts = [];
+          const seenElements = new Set(); // 用于跟踪已处理的元素
+          
+          elementsToTranslate.each(function() {
+            const $element = $(this);
+            const text = $element.text().trim();
+            
+            // 确保元素文本非空、不是标题、未被处理过
+            if (text && text !== chapterTitle && text.length > 0) {
+              // 对于目录页面，可能有很多相同的链接文本，需要检查文本是否已包含
+              if (!seenElements.has(text)) {
+                seenElements.add(text);
+                chapterTexts.push(text);
+              } else {
+                console.log(`跳过重复文本: ${text.substring(0, 30)}${text.length > 30 ? '...' : ''}`);
+              }
+            }
+          });
+          
+          // 过滤重复文本，避免浪费API请求
+          const uniqueTexts = [...new Set(chapterTexts)];
+          console.log(`章节 "${chapterTitle}" 原始文本：${chapterTexts.length}个，去重后：${uniqueTexts.length}个`);
+          
+          if (uniqueTexts.length === 0) {
+            console.log(`章节 "${chapterTitle}" 没有需要翻译的唯一内容，跳过`);
+            continue;
+          }
+          
+          // 将章节文本分成适当大小的批次
+          const batchSize = 5; // 每批处理的文本数量
+          for (let j = 0; j < uniqueTexts.length; j += batchSize) {
+            const textBatch = uniqueTexts.slice(j, j + batchSize);
+            
+            // 使用不容易出现在正常文本中的随机生成分隔符
+            const timestamp = Date.now();
+            const randomString = Math.random().toString(36).substring(2, 10);
+            const SEPARATOR = `\n##--SPLIT_MARK_${timestamp}_${randomString}--##\n`;
+            
+            // 合并批次文本
+            const combinedText = textBatch.join(SEPARATOR);
+            if (combinedText.length === 0) continue;
+            
+            console.log(`批量翻译章节 "${chapterTitle}" 的第 ${Math.floor(j/batchSize) + 1}/${Math.ceil(uniqueTexts.length/batchSize)} 批内容，共 ${combinedText.length} 个字符`);
+            console.log(`批次内容：${textBatch.slice(0, 2).map(t => t.substring(0, 30) + '...').join(', ')}${textBatch.length > 2 ? '...' : ''}`);
+            
+            try {
+              // 批量翻译文本
+              const translatedCombined = await translateText(combinedText, 0);
+              const translatedParts = translatedCombined.split(SEPARATOR);
+              
+              // 验证翻译结果
+              if (translatedParts.length === textBatch.length) {
+                // 处理每个翻译结果，添加到章节内容
+                for (let k = 0; k < translatedParts.length; k++) {
+                  const translatedText = translatedParts[k].trim();
+                  // 从翻译结果中提取翻译部分（去除"原文"部分）
+                  const translatedOnly = translatedText.split('\n【原文】')[0];
+                  translationContent += `${translatedOnly}\n\n`;
+                }
+              } else {
+                console.warn(`翻译结果拆分不匹配: 批次 ${j/batchSize + 1}，期望 ${textBatch.length} 个部分，实际得到 ${translatedParts.length} 个部分`);
+                
+                // 逐个翻译
+                for (const text of textBatch) {
+                  try {
+                    const translatedText = await translateText(text, 0);
+                    const translatedOnly = translatedText.split('\n【原文】')[0];
+                    translationContent += `${translatedOnly}\n\n`;
+                  } catch (singleError) {
+                    console.warn(`单独翻译失败: ${singleError.message}`);
+                    const simText = simulateTranslation(text).split('\n【原文】')[0];
+                    translationContent += `${simText}\n\n`;
+                  }
+                  
+                  // 短暂延迟避免API限制
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+              }
+            } catch (batchError) {
+              console.error(`批量翻译失败: ${batchError.message}`);
+              
+              // 逐个翻译
+              for (const text of textBatch) {
+                try {
+                  const translatedText = await translateText(text, 0);
+                  const translatedOnly = translatedText.split('\n【原文】')[0];
+                  translationContent += `${translatedOnly}\n\n`;
+                } catch (singleError) {
+                  console.warn(`单独翻译失败: ${singleError.message}`);
+                  const simText = simulateTranslation(text).split('\n【原文】')[0];
+                  translationContent += `${simText}\n\n`;
+                }
+                
+                // 短暂延迟避免API限制
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+            
+            // 批次之间添加延迟
+            if (j + batchSize < uniqueTexts.length) {
+              const batchWaitTime = Math.max(TRANSLATE_DELAY/3, 1000);
+              console.log(`批次间等待 ${batchWaitTime}ms...`);
+              await new Promise(resolve => setTimeout(resolve, batchWaitTime));
+            }
+          }
+          
+          // 章节末尾添加分隔线
+          translationContent += `\n---\n\n`;
+          processedChapters++;
+          
+          // 章节之间添加延迟
+          if (i < chapters.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY / 2));
+          }
+          
+          // 每10个章节保存一次进度，避免任务被终止丢失所有翻译
+          if (processedChapters % 10 === 0 || processedChapters === totalChapters) {
+            await fs.writeFile(translationTxtPath, translationContent);
+            console.log(`已保存翻译进度 (章节 ${processedChapters}/${totalChapters})`);
+          }
+        }
+      }
+      
+      // 保存最终翻译文件
+      await fs.writeFile(translationTxtPath, translationContent);
+      console.log(`翻译文件已保存: ${translationTxtPath}`);
+      
+      if (typeof progressCallback === 'function') progressCallback(95, '翻译文件已创建');
+      
+      const endTime = Date.now();
+      const duration = (endTime - startTime) / 1000;
+      console.log(`转换完成，用时 ${duration.toFixed(2)} 秒`);
+      
+      // 清理临时文件
+      console.log('清理临时文件...');
+      
+      // 返回结果包含两个文件路径
+      return {
+        originalPdfPath,
+        translationTxtPath
+      };
+    } catch (convertError) {
+      console.error(`转换失败: ${convertError.message}`);
+      throw convertError;
     }
-    
-    console.log(`PDF转换完成: ${outputPath}`);
-    if (typeof progressCallback === 'function') progressCallback(1, '转换完成');
-    
-    cleanupNeeded = !options.keepTemp;
-    return outputPath;
   } catch (error) {
-    console.error(`EPUB到PDF转换失败: ${error.message}`);
+    console.error(`EPUB转换为PDF失败: ${error.message}`);
     throw error;
-  } finally {
-    // 清理临时文件
-    if (cleanupNeeded) {
-      try {
-        await fs.remove(tempDir);
-        console.log(`已清理临时目录: ${tempDir}`);
-      } catch (cleanupError) {
-        console.warn(`清理临时目录失败: ${cleanupError.message}`);
-      }
-    }
   }
 }
 
@@ -979,12 +1850,18 @@ async function convertEpubToPdf(epubPath, outputPath, progressCallback = null, o
  * 备用翻译方法 - 简化版，更少API调用
  * 仅翻译重要元素且避免频繁API请求
  * @param {string} html - HTML内容
+ * @param {function} progressCallback - 进度回调函数
  * @returns {Promise<string>} - 翻译后的HTML
  */
-async function fallbackTranslateHtml(html) {
+async function fallbackTranslateHtml(html, progressCallback = null) {
   try {
     const $ = cheerio.load(html);
     console.log('使用备用翻译方法处理HTML...');
+    
+    // 通知进度
+    if (typeof progressCallback === 'function') {
+      progressCallback(30, '使用备用翻译方法处理HTML...');
+    }
     
     // 1. 只翻译标题和重要的标题元素
     const title = $('title').text();
@@ -1000,6 +1877,11 @@ async function fallbackTranslateHtml(html) {
       }
     }
     
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      progressCallback(35, '标题翻译完成，开始处理主要标题...');
+    }
+    
     // 2. 标题元素，只处理h1和h2
     const mainHeadings = $('h1, h2').slice(0, 10); // 限制为前10个
     console.log(`选择性翻译 ${mainHeadings.length} 个主要标题元素`);
@@ -1012,7 +1894,21 @@ async function fallbackTranslateHtml(html) {
         try {
           console.log(`翻译主标题 ${i+1}/${mainHeadings.length}: ${text}`);
           const translatedText = await translateText(text, 0);
-          h.text(translatedText);
+          
+          // 使用更好的双语格式
+          if (translatedText.includes('【原文】')) {
+            // 已经包含原文的情况
+            h.html(translatedText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+          } else {
+            // 添加原文作为参考
+            h.html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${text}</span>`);
+          }
+          
+          // 更新进度
+          if (typeof progressCallback === 'function') {
+            const progress = 35 + Math.floor((i / mainHeadings.length) * 15);
+            progressCallback(progress, `已翻译 ${i+1}/${mainHeadings.length} 个主要标题...`);
+          }
           
           // 每个标题添加较长延迟
           await new Promise(resolve => setTimeout(resolve, 10000));
@@ -1021,6 +1917,11 @@ async function fallbackTranslateHtml(html) {
           continue;
         }
       }
+    }
+    
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      progressCallback(50, '主要标题翻译完成，开始处理关键段落...');
     }
     
     // 3. 段落：只翻译前100个字符超过30个的段落，每章节取样
@@ -1058,8 +1959,20 @@ async function fallbackTranslateHtml(html) {
         const sampleText = text.substring(0, 200);
         const translatedText = await translateText(sampleText, 0);
         
-        // 将段落内容替换为翻译后内容+原文
-        p.text(`${translatedText} (原文: ${text})`);
+        // 使用更好的双语格式显示
+        if (translatedText.includes('【原文】')) {
+          // 已经包含原文的情况
+          p.html(translatedText.replace('\n【原文】', '<br><span style="font-size:0.9em;color:#666">【原文】') + '</span>');
+        } else {
+          // 添加原文作为参考，使用HTML格式使其更易阅读
+          p.html(`${translatedText}<br><span style="font-size:0.9em;color:#666">【原文】${text}</span>`);
+        }
+        
+        // 更新进度
+        if (typeof progressCallback === 'function') {
+          const progress = 50 + Math.floor((i / significantParagraphs.length) * 35);
+          progressCallback(progress, `已翻译 ${i+1}/${significantParagraphs.length} 个关键段落...`);
+        }
         
         // 添加长延迟
         await new Promise(resolve => setTimeout(resolve, 15000));
@@ -1070,9 +1983,21 @@ async function fallbackTranslateHtml(html) {
     }
     
     console.log('备用翻译方法完成，已翻译部分重要内容');
+    
+    // 最终进度更新
+    if (typeof progressCallback === 'function') {
+      progressCallback(85, '备用翻译完成，准备生成PDF...');
+    }
+    
     return $.html();
   } catch (error) {
     console.error(`备用翻译失败: ${error.message}`);
+    
+    // 失败时也要通知进度
+    if (typeof progressCallback === 'function') {
+      progressCallback(50, `备用翻译失败: ${error.message}`);
+    }
+    
     return html; // 失败返回原HTML
   }
 }
@@ -1787,19 +2712,51 @@ function getResourceContent(book, resourcePath) {
 
 /**
  * 创建合并的HTML文件
- * @param {Object} epubContent - EPUB内容数据
+ * @param {Array} htmlFiles - HTML文件列表
+ * @param {Array} cssFiles - CSS文件列表
+ * @param {Array} imageFiles - 图片文件列表
+ * @param {Array} tocItems - 目录项列表
  * @param {string} tempDir - 临时目录
- * @returns {Promise<string>} - 合并HTML文件路径
+ * @returns {Promise<string>} - 合并后的HTML文件路径
  */
-async function createConsolidatedHtml(epubContent, tempDir) {
+async function createConsolidatedHtml(htmlFiles, cssFiles, imageFiles, tocItems, tempDir) {
   try {
     console.log('创建合并HTML文件...');
     
-    if (!epubContent || !epubContent.htmlFiles || epubContent.htmlFiles.length === 0) {
+    // 详细的输入验证和调试信息
+    if (!Array.isArray(htmlFiles)) {
+      console.error(`htmlFiles不是数组: ${typeof htmlFiles}`);
+      throw new Error('HTML文件列表格式无效');
+    }
+    
+    if (htmlFiles.length === 0) {
+      console.error('HTML文件列表为空');
       throw new Error('无有效的HTML文件可合并');
     }
     
-    const { htmlFiles, cssFiles, imageFiles, tocItems } = epubContent;
+    console.log(`准备合并 ${htmlFiles.length} 个HTML文件`);
+    
+    // 验证每个HTML文件的路径是否有效
+    let validHtmlFiles = 0;
+    for (const htmlFile of htmlFiles) {
+      if (!htmlFile || !htmlFile.path) {
+        console.warn('发现无效的HTML文件对象(缺少path属性)');
+        continue;
+      }
+      
+      if (!fs.existsSync(htmlFile.path)) {
+        console.warn(`HTML文件不存在: ${htmlFile.path}`);
+        continue;
+      }
+      
+      validHtmlFiles++;
+    }
+    
+    console.log(`验证后有效的HTML文件数量: ${validHtmlFiles}`);
+    
+    if (validHtmlFiles === 0) {
+      throw new Error('所有HTML文件路径无效，无法创建合并文件');
+    }
     
     // 创建HTML头部
     let htmlContent = `
@@ -1884,21 +2841,25 @@ async function createConsolidatedHtml(epubContent, tempDir) {
     `;
     
     // 添加外部CSS
-    if (cssFiles && cssFiles.length > 0) {
+    if (Array.isArray(cssFiles) && cssFiles.length > 0) {
       console.log(`添加 ${cssFiles.length} 个CSS文件到HTML中`);
       
       for (const cssFile of cssFiles) {
         try {
-          if (cssFile.path && fs.existsSync(cssFile.path)) {
+          if (cssFile && cssFile.path && fs.existsSync(cssFile.path)) {
             let cssContent = await fs.readFile(cssFile.path, 'utf8');
             // 修复CSS中的相对路径
-            cssContent = fixCssRelativePaths(cssContent, cssFile.href);
+            cssContent = fixCssRelativePaths(cssContent, cssFile.href || '');
             htmlContent += `<style>${cssContent}</style>`;
+          } else {
+            console.warn(`跳过无效的CSS文件: ${cssFile?.path || '未知'}`);
           }
         } catch (error) {
-          console.warn(`添加CSS文件失败 (${cssFile.path}): ${error.message}`);
+          console.warn(`添加CSS文件失败 (${cssFile?.path || '未知'}): ${error.message}`);
         }
       }
+    } else {
+      console.log('没有CSS文件需要添加');
     }
     
     // 完成头部
@@ -1908,7 +2869,8 @@ async function createConsolidatedHtml(epubContent, tempDir) {
     `;
     
     // 添加标题和目录
-    if (tocItems && tocItems.length > 0) {
+    if (Array.isArray(tocItems) && tocItems.length > 0) {
+      console.log(`添加 ${tocItems.length} 个目录项`);
       htmlContent += `
         <div class="toc">
           <h2>目录</h2>
@@ -1916,37 +2878,51 @@ async function createConsolidatedHtml(epubContent, tempDir) {
       `;
       
       for (let i = 0; i < tocItems.length; i++) {
-        htmlContent += `<li><a href="#chapter-${i}">${tocItems[i].title}</a></li>`;
+        const title = tocItems[i]?.title || `章节 ${i+1}`;
+        htmlContent += `<li><a href="#chapter-${i}">${title}</a></li>`;
       }
       
       htmlContent += `
           </ul>
         </div>
       `;
+    } else {
+      console.log('没有目录项，跳过目录生成');
     }
     
     // 添加章节内容
+    let addedChapters = 0;
     for (let i = 0; i < htmlFiles.length; i++) {
       try {
         const htmlFile = htmlFiles[i];
-        if (!htmlFile.path || !fs.existsSync(htmlFile.path)) {
+        if (!htmlFile || !htmlFile.path) {
+          console.warn(`第 ${i+1} 个HTML文件对象无效`);
+          continue;
+        }
+        
+        if (!fs.existsSync(htmlFile.path)) {
           console.warn(`HTML文件不存在: ${htmlFile.path}`);
           continue;
         }
         
-        console.log(`添加章节 ${i+1}: ${htmlFile.path}`);
+        console.log(`处理章节 ${i+1}/${htmlFiles.length}: ${path.basename(htmlFile.path)}`);
         
         // 读取HTML文件内容
         let chapterContent = await fs.readFile(htmlFile.path, 'utf8');
         
         // 修复章节中的相对路径
-        chapterContent = fixHtmlRelativePaths(chapterContent, htmlFile.href, imageFiles);
+        chapterContent = fixHtmlRelativePaths(chapterContent, htmlFile.href || '', imageFiles || []);
         
         // 提取HTML内容主体部分
         const bodyContent = extractBodyContent(chapterContent);
         
+        if (!bodyContent || bodyContent.trim() === '') {
+          console.warn(`章节 ${i+1} 内容为空，跳过`);
+          continue;
+        }
+        
         // 添加章节标题和内容
-        const title = tocItems[i]?.title || `章节 ${i+1}`;
+        const title = (tocItems && tocItems[i]?.title) || `章节 ${i+1}`;
         
         htmlContent += `
           <div class="chapter" id="chapter-${i}">
@@ -1954,9 +2930,17 @@ async function createConsolidatedHtml(epubContent, tempDir) {
             ${bodyContent}
           </div>
         `;
+        
+        addedChapters++;
       } catch (error) {
-        console.warn(`处理章节内容失败: ${error.message}`);
+        console.warn(`处理章节 ${i+1} 内容失败: ${error.message}`);
       }
+    }
+    
+    console.log(`成功添加了 ${addedChapters} 个章节`);
+    
+    if (addedChapters === 0) {
+      throw new Error('无法提取任何章节内容，请检查HTML文件格式');
     }
     
     // 结束HTML
@@ -1967,7 +2951,7 @@ async function createConsolidatedHtml(epubContent, tempDir) {
     
     // 写入合并的HTML文件
     const outputPath = path.join(tempDir, 'consolidated.html');
-    await fs.writeFile(outputPath, htmlContent);
+    await fs.writeFile(outputPath, htmlContent, 'utf8');
     
     console.log(`已创建合并HTML文件: ${outputPath}`);
     return outputPath;
@@ -2191,6 +3175,482 @@ async function convertHtmlToPdf(htmlPath, outputPath, progressCallback = null) {
   }
 }
 
+/**
+ * 按照标题分段生成翻译文件
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {string} translationMethod - 翻译方法
+ * @param {string} translationContent - 当前翻译内容
+ * @param {string} translationTxtPath - 翻译文件保存路径
+ * @param {function} progressCallback - 进度回调函数
+ */
+async function generateTranslationByHeadings($, translationMethod, translationContent, translationTxtPath, progressCallback) {
+  console.log('使用标题分割章节生成翻译');
+  
+  // 查找所有标题元素
+  const headings = $('h1, h2, h3, h4');
+  console.log(`找到 ${headings.length} 个标题元素作为分段点`);
+  
+  if (headings.length === 0) {
+    // 如果没有找到标题，使用原始方法
+    console.log('没有找到标题元素，使用原始元素处理方法');
+    await generateTranslationByElements($, translationMethod, translationContent, translationTxtPath, progressCallback);
+    return;
+  }
+  
+  // 处理每个标题和其下内容
+  let processedHeadings = 0;
+  const totalHeadings = headings.length;
+  
+  for (let i = 0; i < headings.length; i++) {
+    const heading = headings.eq(i);
+    const headingText = heading.text().trim();
+    
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      const progress = 85 + Math.floor((processedHeadings / totalHeadings) * 10);
+      progressCallback(progress, `处理部分 ${processedHeadings+1}/${totalHeadings}: ${headingText}`);
+    }
+    
+    // 翻译标题
+    let translatedHeading = '';
+    try {
+      translatedHeading = await translateText(headingText, 0);
+      translatedHeading = translatedHeading.split('\n【原文】')[0]; // 只获取翻译部分
+    } catch (err) {
+      console.error(`标题翻译失败: ${err.message}`);
+      translatedHeading = simulateTranslation(headingText).split('\n【原文】')[0];
+    }
+    
+    // 添加标题到翻译内容
+    translationContent += `## ${translatedHeading}\n\n`;
+    
+    // 收集标题下的内容元素
+    const contentElements = [];
+    let elem = heading;
+    while (elem.next().length && !elem.next().is('h1, h2, h3, h4')) {
+      elem = elem.next();
+      if (elem.is('p, li') && elem.text().trim().length > 0) {
+        contentElements.push(elem);
+      }
+    }
+    
+    console.log(`标题 "${headingText}" 下找到 ${contentElements.length} 个内容元素`);
+    
+    // 批量翻译内容元素
+    if (contentElements.length > 0) {
+      const batchSize = 5;
+      let contentTexts = [];
+      const seenElements = new Set(); // 用于跟踪已处理的元素
+      
+      contentElements.forEach(element => {
+        const text = $(element).text().trim();
+        if (text.length > 0) {
+          // 检查是否处理过相同文本
+          if (!seenElements.has(text)) {
+            seenElements.add(text);
+            contentTexts.push(text);
+          } else {
+            console.log(`跳过重复文本: ${text.substring(0, 30)}${text.length > 30 ? '...' : ''}`);
+          }
+        }
+      });
+      
+      // 过滤重复文本，避免浪费API请求
+      const uniqueTexts = [...new Set(contentTexts)];
+      console.log(`标题 "${headingText}" 下原始文本：${contentTexts.length}个，去重后：${uniqueTexts.length}个`);
+      
+      if (uniqueTexts.length === 0) {
+        console.log(`标题 "${headingText}" 下没有需要翻译的唯一内容，跳过`);
+        continue;
+      }
+      
+      // 分批翻译内容
+      for (let j = 0; j < uniqueTexts.length; j += batchSize) {
+        const textBatch = uniqueTexts.slice(j, j + batchSize);
+        
+        // 使用独特分隔符
+        const timestamp = Date.now();
+        const randomString = Math.random().toString(36).substring(2, 10);
+        const SEPARATOR = `\n##--SPLIT_MARK_${timestamp}_${randomString}--##\n`;
+        
+        const combinedText = textBatch.join(SEPARATOR);
+        if (combinedText.length === 0) continue;
+        
+        console.log(`批量翻译 "${headingText}" 的第 ${j/batchSize + 1} 批内容，共 ${combinedText.length} 个字符`);
+        console.log(`批次内容：${textBatch.slice(0, 2).map(t => t.substring(0, 30) + '...').join(', ')}${textBatch.length > 2 ? '...' : ''}`);
+        
+        try {
+          const translatedCombined = await translateText(combinedText, 0);
+          const translatedParts = translatedCombined.split(SEPARATOR);
+          
+          if (translatedParts.length === textBatch.length) {
+            for (let k = 0; k < translatedParts.length; k++) {
+              const translatedText = translatedParts[k].trim();
+              const translatedOnly = translatedText.split('\n【原文】')[0];
+              translationContent += `${translatedOnly}\n\n`;
+            }
+          } else {
+            console.warn(`翻译结果拆分不匹配，逐个处理`);
+            
+            for (const text of textBatch) {
+              try {
+                const translatedText = await translateText(text, 0);
+                const translatedOnly = translatedText.split('\n【原文】')[0];
+                translationContent += `${translatedOnly}\n\n`;
+              } catch (singleError) {
+                console.warn(`单独翻译失败: ${singleError.message}`);
+                const simText = simulateTranslation(text).split('\n【原文】')[0];
+                translationContent += `${simText}\n\n`;
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+        } catch (batchError) {
+          console.error(`批量翻译失败: ${batchError.message}`);
+          
+          for (const text of textBatch) {
+            try {
+              const translatedText = await translateText(text, 0);
+              const translatedOnly = translatedText.split('\n【原文】')[0];
+              translationContent += `${translatedOnly}\n\n`;
+            } catch (singleError) {
+              console.warn(`单独翻译失败: ${singleError.message}`);
+              const simText = simulateTranslation(text).split('\n【原文】')[0];
+              translationContent += `${simText}\n\n`;
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        
+        // 批次之间添加延迟
+        if (j + batchSize < uniqueTexts.length) {
+          const batchWaitTime = Math.max(TRANSLATE_DELAY/3, 1000);
+          console.log(`批次间等待 ${batchWaitTime}ms...`);
+          await new Promise(resolve => setTimeout(resolve, batchWaitTime));
+        }
+      }
+    }
+    
+    // 章节末尾添加分隔线
+    translationContent += `\n---\n\n`;
+    processedHeadings++;
+    
+    // 章节之间添加延迟
+    if (i < headings.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, TRANSLATE_DELAY / 2));
+    }
+    
+    // 每10个标题保存一次进度
+    if (processedHeadings % 10 === 0 || processedHeadings === totalHeadings) {
+      await fs.writeFile(translationTxtPath, translationContent);
+      console.log(`已保存翻译进度 (标题 ${processedHeadings}/${totalHeadings})`);
+    }
+  }
+  
+  // 保存最终翻译文件
+  await fs.writeFile(translationTxtPath, translationContent);
+}
+
+/**
+ * 按元素逐个生成翻译文件 (原方法，作为最后的备选)
+ * @param {CheerioStatic} $ - Cheerio对象
+ * @param {string} translationMethod - 翻译方法
+ * @param {string} translationContent - 当前翻译内容
+ * @param {string} translationTxtPath - 翻译文件保存路径
+ * @param {function} progressCallback - 进度回调函数
+ */
+async function generateTranslationByElements($, translationMethod, translationContent, translationTxtPath, progressCallback) {
+  console.log('使用元素级处理方法生成翻译');
+  
+  // 提取所有需要翻译的元素
+  const elementsToTranslate = $('h1, h2, h3, h4, h5, h6, p, li').filter(function() {
+    const text = $(this).text().trim();
+    return text.length > 0 && /[a-zA-Z]{5,}/.test(text);
+  }).toArray();
+  
+  console.log(`找到 ${elementsToTranslate.length} 个需要翻译的元素`);
+  let currentHeading = '开始章节';
+  let currentSection = '';
+  let elementsProcessed = 0;
+  
+  // 将元素分批处理
+  const batchSize = 5;
+  for (let i = 0; i < elementsToTranslate.length; i += batchSize) {
+    const elementBatch = elementsToTranslate.slice(i, Math.min(i + batchSize, elementsToTranslate.length));
+    
+    // 更新进度
+    if (typeof progressCallback === 'function') {
+      const progress = 85 + Math.floor((i / elementsToTranslate.length) * 10);
+      progressCallback(progress, `处理元素 ${i+1}/${elementsToTranslate.length}...`);
+    }
+    
+    // 收集批次文本
+    const textBatch = [];
+    const elementInfo = [];
+    
+    for (const element of elementBatch) {
+      const $element = $(element);
+      const tagName = element.tagName.toLowerCase();
+      const text = $element.text().trim();
+      
+      if (text.length === 0) continue;
+      
+      textBatch.push(text);
+      elementInfo.push({ tagName, text });
+    }
+    
+    // 过滤重复文本，避免浪费API请求
+    const uniqueBatch = [];
+    const uniqueInfo = [];
+    const seenTexts = new Set();
+    
+    for (let i = 0; i < textBatch.length; i++) {
+      if (!seenTexts.has(textBatch[i])) {
+        seenTexts.add(textBatch[i]);
+        uniqueBatch.push(textBatch[i]);
+        uniqueInfo.push(elementInfo[i]);
+      }
+    }
+    
+    console.log(`批次原始文本：${textBatch.length}个，去重后：${uniqueBatch.length}个`);
+    
+    if (uniqueBatch.length === 0) {
+      console.log(`批次没有需要翻译的唯一内容，跳过`);
+      continue;
+    }
+    
+    // 使用分隔符合并文本
+    const timestamp = Date.now();
+    const randomString = Math.random().toString(36).substring(2, 10);
+    const SEPARATOR = `\n##--SPLIT_MARK_${timestamp}_${randomString}--##\n`;
+    
+    const combinedText = uniqueBatch.join(SEPARATOR);
+    if (combinedText.length === 0) continue;
+    
+    console.log(`批量翻译第 ${Math.floor(i/batchSize) + 1}/${Math.ceil(elementsToTranslate.length/batchSize)} 批元素，共 ${combinedText.length} 个字符`);
+    console.log(`批次内容：${uniqueBatch.slice(0, 2).map(t => t.substring(0, 30) + '...').join(', ')}${uniqueBatch.length > 2 ? '...' : ''}`);
+    
+    try {
+      // 批量翻译
+      const translatedCombined = await translateText(combinedText, 0);
+      const translatedParts = translatedCombined.split(SEPARATOR);
+      
+      if (translatedParts.length === uniqueBatch.length) {
+        // 处理翻译结果
+        for (let j = 0; j < uniqueInfo.length; j++) {
+          const { tagName, text } = uniqueInfo[j];
+          const translatedText = translatedParts[j].trim();
+          const translatedOnly = translatedText.split('\n【原文】')[0];
+          
+          // 处理标题元素
+          if (/^h[1-4]$/.test(tagName)) {
+            // 保存上一节内容
+            if (currentSection.trim()) {
+              translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+            }
+            
+            // 开始新章节
+            currentHeading = text;
+            currentSection = '';
+            
+            // 添加章节标题
+            translationContent += `## ${translatedOnly}\n\n`;
+          } else {
+            // 添加到当前章节内容
+            currentSection += `${translatedOnly}\n\n`;
+          }
+        }
+      } else {
+        console.warn(`翻译结果拆分不匹配，逐个处理元素`);
+        
+        // 逐个处理元素
+        for (const { tagName, text } of uniqueInfo) {
+          try {
+            const translatedText = await translateText(text, 0);
+            const translatedOnly = translatedText.split('\n【原文】')[0];
+            
+            // 处理标题元素
+            if (/^h[1-4]$/.test(tagName)) {
+              // 保存上一节内容
+              if (currentSection.trim()) {
+                translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+              }
+              
+              // 开始新章节
+              currentHeading = text;
+              currentSection = '';
+              
+              // 添加章节标题
+              translationContent += `## ${translatedOnly}\n\n`;
+            } else {
+              // 添加到当前章节内容
+              currentSection += `${translatedOnly}\n\n`;
+            }
+          } catch (singleError) {
+            console.warn(`单独翻译元素失败: ${singleError.message}`);
+            const simText = simulateTranslation(text).split('\n【原文】')[0];
+            
+            if (/^h[1-4]$/.test(tagName)) {
+              if (currentSection.trim()) {
+                translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+              }
+              currentHeading = text;
+              currentSection = '';
+              translationContent += `## ${simText}\n\n`;
+            } else {
+              currentSection += `${simText}\n\n`;
+            }
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    } catch (batchError) {
+      console.error(`批量翻译失败: ${batchError.message}`);
+      
+      // 逐个处理元素
+      for (const { tagName, text } of uniqueInfo) {
+        try {
+          const translatedText = await translateText(text, 0);
+          const translatedOnly = translatedText.split('\n【原文】')[0];
+          
+          if (/^h[1-4]$/.test(tagName)) {
+            if (currentSection.trim()) {
+              translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+            }
+            currentHeading = text;
+            currentSection = '';
+            translationContent += `## ${translatedOnly}\n\n`;
+          } else {
+            currentSection += `${translatedOnly}\n\n`;
+          }
+        } catch (singleError) {
+          console.warn(`单独翻译元素失败: ${singleError.message}`);
+          const simText = simulateTranslation(text).split('\n【原文】')[0];
+          
+          if (/^h[1-4]$/.test(tagName)) {
+            if (currentSection.trim()) {
+              translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+            }
+            currentHeading = text;
+            currentSection = '';
+            translationContent += `## ${simText}\n\n`;
+          } else {
+            currentSection += `${simText}\n\n`;
+          }
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    // 批次之间添加延迟
+    if (i + batchSize < elementsToTranslate.length) {
+      const batchWaitTime = Math.max(TRANSLATE_DELAY/3, 1000);
+      console.log(`批次间等待 ${batchWaitTime}ms...`);
+      await new Promise(resolve => setTimeout(resolve, batchWaitTime));
+    }
+    
+    // 每50个元素保存一次进度
+    elementsProcessed += elementBatch.length;
+    if (elementsProcessed % 50 === 0 || elementsProcessed >= elementsToTranslate.length) {
+      // 保存最后一节
+      if (currentSection.trim()) {
+        translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+        currentSection = '';
+      }
+      
+      await fs.writeFile(translationTxtPath, translationContent);
+      console.log(`已保存翻译进度 (元素 ${elementsProcessed}/${elementsToTranslate.length})`);
+    }
+  }
+  
+  // 保存最后一节内容
+  if (currentSection.trim()) {
+    translationContent += `### ${currentHeading}\n\n${currentSection}\n\n`;
+  }
+  
+  // 保存最终翻译文件
+  await fs.writeFile(translationTxtPath, translationContent);
+}
+
+/**
+ * 从PDF文件中提取文本内容
+ * @param {string} pdfPath - PDF文件路径
+ * @param {function} progressCallback - 进度回调函数
+ * @returns {Promise<string>} - 提取的文本内容
+ */
+async function extractTextFromPdf(pdfPath, progressCallback = null) {
+  try {
+    if (typeof progressCallback === 'function') {
+      progressCallback(10, '加载PDF文件...');
+    }
+    
+    // 使用pdf-parse库来提取PDF文本
+    const fs = require('fs').promises;
+    const pdf = require('pdf-parse');
+    
+    // 读取PDF文件
+    const dataBuffer = await fs.readFile(pdfPath);
+    
+    if (typeof progressCallback === 'function') {
+      progressCallback(30, '开始解析PDF内容...');
+    }
+
+    // 解析PDF内容
+    const data = await pdf(dataBuffer, {
+      // 自定义渲染页面文本的函数
+      pagerender: function(pageData) {
+        return pageData.getTextContent({ normalizeWhitespace: true })
+          .then(function(textContent) {
+            let lastY, text = '';
+            for (let item of textContent.items) {
+              if (lastY == item.transform[5] || !lastY) {
+                text += item.str;
+              } else {
+                text += '\n' + item.str;
+              }
+              lastY = item.transform[5];
+            }
+            return text;
+          });
+      }
+    });
+    
+    if (typeof progressCallback === 'function') {
+      progressCallback(70, '清理和格式化文本...');
+    }
+    
+    // 清理提取的文本
+    let extractedText = data.text;
+    
+    // 按段落拆分，清理多余空白
+    const paragraphs = extractedText
+      .split(/\n\s*\n/)             // 按照空行分割成段落
+      .filter(p => p.trim().length > 0)  // 过滤掉空段落
+      .map(p => {
+        return p.replace(/\s+/g, ' ').trim();  // 将多个空白字符替换为单个空格
+      });
+    
+    // 重新组合为格式化文本
+    const formattedText = paragraphs.join('\n\n');
+    
+    if (typeof progressCallback === 'function') {
+      progressCallback(100, 'PDF文本提取完成');
+    }
+    
+    return formattedText;
+  } catch (error) {
+    console.error(`PDF文本提取失败: ${error.message}`);
+    if (typeof progressCallback === 'function') {
+      progressCallback(0, `文本提取失败: ${error.message}`);
+    }
+    throw new Error(`无法从PDF提取文本: ${error.message}`);
+  }
+}
+
 // 导出的函数
 module.exports = {
   convertEpubToPdf,
@@ -2198,5 +3658,11 @@ module.exports = {
   parseEpub,
   extractEpubDirectly,
   createConsolidatedHtml,
-  convertHtmlToPdf
+  convertHtmlToPdf,
+  translateHtml,
+  extractTextFromPdf,
+  simulateTranslation,
+  translateWithSiliconFlow,
+  translateWithDeepSeek,
+  translateWithGoogle
 }; 
